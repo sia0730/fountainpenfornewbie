@@ -137,6 +137,7 @@ export async function renderSlideToJpegBuffer(params: {
   accentColor: string;
   watermarkText?: string;
   showWatermark?: boolean;
+  accountName?: string;
 }): Promise<Buffer> {
   const {
     slide,
