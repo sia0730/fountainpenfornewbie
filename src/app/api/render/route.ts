@@ -1,10 +1,8 @@
 // src/app/api/render/route.ts
-// [기능 3 & 기능 4] 서버에서 satori + sharp로 모든 슬라이드를 고화질 JPEG로 생성하고,
-// 인스타그램이 읽을 수 있도록 Supabase Storage 공개 URL로 업로드하여 반환합니다.
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin, getUserFromRequest } from '@/lib/supabase';
 import { renderSlideToJpegBuffer } from '@/lib/renderer';
-import { AspectRatioKey, FontId, MoodId } from '@/config/constants';
+import { AspectRatioKey, MoodId } from '@/config/constants';
 import { SlideItem } from '@/types';
 
 export async function POST(req: Request) {
@@ -19,17 +17,21 @@ export async function POST(req: Request) {
       slides = [],
       aspectRatio = '4:5',
       fontId = 'Pretendard',
+      customFontBase64 = '',
       moodId = 'minimal',
       accentColor = '#2563EB',
-      accountName = '',
+      watermarkText = '',
+      showWatermark = false,
       uploadToStorage = false,
     }: {
       slides: SlideItem[];
       aspectRatio: AspectRatioKey;
-      fontId: FontId;
+      fontId: string;
+      customFontBase64?: string;
       moodId: MoodId;
       accentColor: string;
-      accountName?: string;
+      watermarkText?: string;
+      showWatermark?: boolean;
       uploadToStorage?: boolean;
     } = body;
 
@@ -47,13 +49,14 @@ export async function POST(req: Request) {
         totalSlides: slides.length,
         aspectRatio,
         fontId,
+        customFontBase64: customFontBase64 || undefined,
         moodId,
         accentColor,
-        accountName,
+        watermarkText,
+        showWatermark,
       });
 
       if (uploadToStorage) {
-        // 인스타 API가 외부에서 읽을 수 있도록 Supabase Storage 공개 버킷(post-images)에 JPEG 저장
         const filePath = `${user.id}/post-${Date.now()}-slide-${i + 1}.jpg`;
         const { error: uploadErr } = await admin.storage
           .from('post-images')
@@ -69,7 +72,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // 미리보기 또는 다운로드 전용일 때는 즉각적인 Data URI 반환
       renderedUrls.push(`data:image/jpeg;base64,${jpegBuffer.toString('base64')}`);
     }
 

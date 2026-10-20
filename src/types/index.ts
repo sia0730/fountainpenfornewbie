@@ -3,12 +3,21 @@ import { AspectRatioKey, CaptionToneId, FontId, MoodId } from '@/config/constant
 
 export type SlideRole = 'single_core' | 'cover' | 'body' | 'cta';
 
+export type SlideLayoutType = 'auto' | 'top-photo' | 'bottom-photo' | 'full-bleed' | 'split-left';
+
 export interface UploadedPhoto {
   id: string;
   url: string; // 공개 URL 또는 Data URL
   name: string;
   width?: number;
   height?: number;
+}
+
+export interface CustomFontItem {
+  id: string;
+  name: string;
+  base64Data: string; // base64 font buffer for satori server rendering
+  mimeType?: string;
 }
 
 export interface SlideItem {
@@ -19,11 +28,28 @@ export interface SlideItem {
   badgeText: string;
   headline: string;
   body: string;
-  photoIndex: number | null; // uploadedPhotos 배열 내 인덱스 (사진 없는 글 전용 장이면 null)
-  photoUrl?: string | null;
-  focusX?: number; // 0~100 (얼굴/피사체 중심 가로 비율)
-  focusY?: number; // 0~100 (얼굴/피사체 중심 세로 비율)
-  textPosition?: 'top' | 'bottom' | 'center';
+  photoIndex: number | null; // 대표 사진 인덱스 (하위 호환)
+  photoUrl?: string | null; // 대표 사진 URL (하위 호환)
+  // 한 장에 사진 여러 장(1~4장) 넣기 지원
+  photoIndices?: number[];
+  photoUrls?: string[];
+  multiPhotoLayout?: 'auto' | 'row' | 'col' | 'grid' | 'collage';
+  // 사진 직접 수정 (위치/확대/어둡기)
+  focusX?: number; // 0~100 (가로 위치 중심)
+  focusY?: number; // 0~100 (세로 위치 중심)
+  photoZoom?: number; // 100~200 (%)
+  overlayOpacity?: number; // 0~85 (%) 배경 사진 위 어두운 정도
+  // 레이아웃 및 글씨 위치·크기·정렬·색상 직접 수정
+  layoutType?: SlideLayoutType;
+  textPosition?: 'top' | 'center' | 'bottom';
+  textAlign?: 'left' | 'center' | 'right';
+  titleSize?: number; // 사용자 지정 제목 크기 (px)
+  bodySize?: number; // 사용자 지정 본문 크기 (px)
+  customTextColor?: string;
+  customBgColor?: string;
+  showBadge?: boolean;
+  showSlideNumber?: boolean;
+  footerText?: string; // 슬라이드별 하단 문구 (비워두면 표시 안 함)
   renderedUrl?: string;
 }
 
@@ -70,7 +96,7 @@ export interface PostRecord {
   publish_mode: 'auto_publish' | 'download_only';
   slide_count: number;
   aspect_ratio: AspectRatioKey;
-  font_family: FontId;
+  font_family: string;
   mood_preset: MoodId;
   accent_color: string;
   caption_tone: CaptionToneId;

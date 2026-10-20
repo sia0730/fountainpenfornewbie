@@ -60,8 +60,11 @@ export async function POST(req: Request) {
       slideCount = 1,
       aspectRatio = '4:5',
       fontId = 'Pretendard',
+      customFontBase64 = '',
       moodId = 'minimal',
       accentColor = '#2563EB',
+      watermarkText = '',
+      showWatermark = false,
       captionTone = 'friendly',
       baseCaption = '',
       slides = [],
@@ -151,8 +154,11 @@ export async function POST(req: Request) {
         totalSlides: slides.length,
         aspectRatio,
         fontId,
+        customFontBase64: customFontBase64 || undefined,
         moodId,
         accentColor,
+        watermarkText,
+        showWatermark,
       });
 
       const filePath = `${user.id}/post-${Date.now()}-slide-${i + 1}.jpg`;
