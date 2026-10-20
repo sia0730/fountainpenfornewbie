@@ -280,10 +280,234 @@ export interface SlideItem extends BaseSlideItem {
   templateId?: CardTemplateId;
   photoFitMode?: PhotoFitMode; // 장별 사진 표시 방식 (기본: 'contain' 전체 보이기)
   photoBgFillMode?: PhotoBgFillMode; // 장별 남는 공간 채우기 (기본: 'solid' 배경색 / 'blur' 블러 배경)
+  photoOverlayText?: string; // 사진 위에 얹는 한두 줄 문구 ("사진에 들어갈 글")
+  photoGuide?: string; // 이 컷에 어울리는 사진 가이드
   isManuallyEdited?: boolean; // 사용자가 직접 제목/본문을 작성·수정한 적이 있는지 여부
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fabricJson?: any;
   previewDataUrl?: string;
+}
+
+// ============================================================================
+// [1단계 신규] 주제 → AI 컷별 기획안 타입 & 클라이언트 안전 폴백 도우미
+// ============================================================================
+export type PlanCutRoleLabel =
+  | '표지'
+  | '공감'
+  | '핵심 정보'
+  | '예시'
+  | '요약'
+  | '마무리·행동 유도';
+
+const PLAN_CUT_ROLE_OPTIONS: PlanCutRoleLabel[] = [
+  '표지',
+  '공감',
+  '핵심 정보',
+  '예시',
+  '요약',
+  '마무리·행동 유도',
+];
+
+export interface PlanCutItem {
+  id: string;
+  slideNumber: number;
+  roleType: PlanCutRoleLabel;
+  headline: string; // 제목 (15자 안팎 권장)
+  body: string; // 짧은 본문 (2~3줄 권장)
+  photoOverlayText: string; // "사진에 들어갈 글" (사진 위에 얹는 한두 줄 문구)
+  photoGuide: string; // "이 컷에 어울리는 사진 가이드" (예: "제품을 손에 든 사진")
+  isManuallyEdited?: boolean; // 내가 직접 고친 컷인지 여부 (덮어쓰기 전 확인창 표시용)
+}
+
+export interface AIPlanDocument {
+  id: string;
+  label: string; // 예: "기획안 1", "기획안 2", "기획안 3"
+  topic: string;
+  targetAudience: string;
+  purpose: string;
+  tone: string;
+  referenceText: string;
+  coverTitleCandidates: [string, string, string]; // 눈길을 끄는 순서로 표지 제목 후보 3개
+  selectedCoverCandidateIndex: number; // 내가 고른 표지 제목 번호 (0, 1, 2)
+  recommendedSlideCount: number; // 추천 장수
+  recommendationReason: string; // 추천 이유
+  cuts: PlanCutItem[]; // 컷별 구성
+  isApproved: boolean; // 사용자가 기획안 OK(승인) 했는지 여부
+  createdAt: string;
+  updatedAt: string;
+}
+
+const DAILY_AI_LIMIT_MAX = 10;
+const SAVED_PLANS_STORAGE_KEY = 'acs_saved_plans_v1';
+
+function buildClientFallbackSingleCut(params: {
+  topic: string;
+  slideNumber: number;
+  totalSlides: number;
+  roleType?: PlanCutRoleLabel;
+}): PlanCutItem {
+  const shortTopic = params.topic.trim().slice(0, 12) || '오늘의 주제';
+  const idx = params.slideNumber - 1;
+  const isFirst = idx === 0;
+  const isLast = params.slideNumber === params.totalSlides && params.totalSlides > 1;
+
+  const roleType: PlanCutRoleLabel =
+    params.roleType ||
+    (isFirst
+      ? '표지'
+      : isLast
+      ? '마무리·행동 유도'
+      : idx === 1
+      ? '공감'
+      : idx === params.totalSlides - 2 && params.totalSlides >= 5
+      ? '요약'
+      : idx % 2 === 0
+      ? '핵심 정보'
+      : '예시');
+
+  if (roleType === '표지') {
+    return {
+      id: `cut-${Date.now()}-${params.slideNumber}`,
+      slideNumber: params.slideNumber,
+      roleType: '표지',
+      headline: `${shortTopic} 핵심 총정리`,
+      body: `처음 시작할 때 꼭 알아야 할 포인트를\n한눈에 보기 쉽게 정리했어요 👉`,
+      photoOverlayText: `${shortTopic}, 이것만 기억하세요!`,
+      photoGuide: '주제를 가장 잘 보여주는 밝고 선명한 대표 사진 (정면 또는 클로즈업)',
+      isManuallyEdited: false,
+    };
+  }
+  if (roleType === '공감') {
+    return {
+      id: `cut-${Date.now()}-${params.slideNumber}`,
+      slideNumber: params.slideNumber,
+      roleType: '공감',
+      headline: `혹시 이런 고민 해보셨나요?`,
+      body: `막상 시작하려니 어디서부터 봐야 할지\n막막했던 분들을 위해 쉽게 풀어드립니다.`,
+      photoOverlayText: `처음엔 누구나 헷갈리기 쉬워요`,
+      photoGuide: '일상적인 분위기나 고민·질문 상황에 어울리는 자연스러운 사진',
+      isManuallyEdited: false,
+    };
+  }
+  if (roleType === '예시') {
+    return {
+      id: `cut-${Date.now()}-${params.slideNumber}`,
+      slideNumber: params.slideNumber,
+      roleType: '예시',
+      headline: `실제로 이렇게 활용해 보세요`,
+      body: `작은 차이만 알아도 훨씬 수월해집니다.\n내 상황에 맞춰 바로 적용해 보세요!`,
+      photoOverlayText: `바로 따라 하는 실전 예시`,
+      photoGuide: '실제 사용하는 모습이나 제품을 손에 든 디테일 사진',
+      isManuallyEdited: false,
+    };
+  }
+  if (roleType === '요약') {
+    return {
+      id: `cut-${Date.now()}-${params.slideNumber}`,
+      slideNumber: params.slideNumber,
+      roleType: '요약',
+      headline: `바쁜 분들을 위한 3줄 요약`,
+      body: `1. 기본 원리 먼저 가볍게 익히기\n2. 내 취향과 목적에 맞는 기준 고르기\n3. 작은 것부터 오늘 바로 실천하기`,
+      photoOverlayText: `핵심만 쏙 뽑은 요약 노트`,
+      photoGuide: '깔끔하게 정리된 책상, 노트, 또는 전체 구성품이 한눈에 보이는 사진',
+      isManuallyEdited: false,
+    };
+  }
+  if (roleType === '마무리·행동 유도') {
+    return {
+      id: `cut-${Date.now()}-${params.slideNumber}`,
+      slideNumber: params.slideNumber,
+      roleType: '마무리·행동 유도',
+      headline: `저장해 두고 필요할 때 꺼내보세요!`,
+      body: `오늘 내용이 도움이 되셨다면 [저장]과 [공유],\n궁금한 점은 언제든 댓글로 남겨주세요 💬`,
+      photoOverlayText: `📌 저장 필수! 친구에게도 공유해 보세요`,
+      photoGuide: '따뜻하고 여운이 남는 감성 사진 또는 브랜드 시그니처 무드 사진',
+      isManuallyEdited: false,
+    };
+  }
+  return {
+    id: `cut-${Date.now()}-${params.slideNumber}`,
+    slideNumber: params.slideNumber,
+    roleType: '핵심 정보',
+    headline: `꼭 챙겨야 할 핵심 포인트 ${idx}`,
+    body: `복잡한 설명 없이 가장 중요한 기준만\n콕 집어서 알기 쉽게 확인해 보세요.`,
+    photoOverlayText: `체크 포인트 #${idx}`,
+    photoGuide: '핵심 특징이나 비교 포인트가 잘 드러나는 선명한 사진',
+    isManuallyEdited: false,
+  };
+}
+
+function buildClientFallbackPlan(params: {
+  topic: string;
+  targetAudience?: string;
+  purpose?: string;
+  tone?: string;
+  referenceText?: string;
+  slideCountOption?: 'auto' | number;
+  variantIndex?: number;
+}): AIPlanDocument {
+  const cleanTopic = params.topic.trim() || '알아두면 쓸모 있는 핵심 가이드';
+  const shortTopic = cleanTopic.slice(0, 12);
+  const vIdx = params.variantIndex || 0;
+
+  const recommendedCount =
+    params.slideCountOption && params.slideCountOption !== 'auto'
+      ? Math.max(1, Math.min(MAX_SLIDES.DOWNLOAD_ONLY, Number(params.slideCountOption)))
+      : 5;
+
+  const candidateSets: [string, string, string][] = [
+    [
+      `${shortTopic}, 이것만 알면 끝!`,
+      `초보자도 실패 없는 ${shortTopic} 비법`,
+      `몰라서 손해 봤던 ${shortTopic} 핵심 정리`,
+    ],
+    [
+      `왜 다들 ${shortTopic}에 주목할까?`,
+      `3분 만에 끝내는 ${shortTopic} 입문 가이드`,
+      `후회 없는 ${shortTopic} 선택 기준 3가지`,
+    ],
+    [
+      `현실적으로 가장 쉬운 ${shortTopic} 꿀팁`,
+      `처음 시작할 때 꼭 봐야 할 ${shortTopic}`,
+      `저장 필수! 한눈에 보는 ${shortTopic} 요약`,
+    ],
+  ];
+
+  const coverTitleCandidates = candidateSets[vIdx % candidateSets.length];
+
+  const cuts: PlanCutItem[] = Array.from({ length: recommendedCount }).map((_, idx) => {
+    const cut = buildClientFallbackSingleCut({
+      topic: cleanTopic,
+      slideNumber: idx + 1,
+      totalSlides: recommendedCount,
+    });
+    if (idx === 0) {
+      cut.headline = coverTitleCandidates[0];
+    }
+    return cut;
+  });
+
+  const nowIso = new Date().toISOString();
+  return {
+    id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    label: `기획안 ${vIdx + 1}`,
+    topic: cleanTopic,
+    targetAudience: params.targetAudience || '',
+    purpose: params.purpose || '',
+    tone: params.tone || '',
+    referenceText: params.referenceText || '',
+    coverTitleCandidates,
+    selectedCoverCandidateIndex: 0,
+    recommendedSlideCount: recommendedCount,
+    recommendationReason:
+      params.slideCountOption && params.slideCountOption !== 'auto'
+        ? `직접 선택하신 ${recommendedCount}장 구성에 맞춰 표지부터 핵심 정보, 마지막 행동 유도까지 한눈에 읽히도록 배치했습니다.`
+        : `인스타그램에서 독자가 끝까지 넘겨보기 가장 좋은 ${recommendedCount}장(표지 → 공감 → 핵심 정보 → 예시/요약 → 행동 유도) 구성을 추천했어요.`,
+    cuts,
+    isApproved: false,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
 }
 
 // ============================================================================
@@ -292,6 +516,7 @@ export interface SlideItem extends BaseSlideItem {
 const TEXT_LENGTH_GUIDE = {
   HEADLINE_WARN: 35, // 제목 35자 초과 시 "글이 길어요" 안내
   BODY_WARN: 130, // 본문 130자 초과 시 "글이 길어요" 안내
+  PLAN_HEADLINE_GUIDE: 18, // 기획안 제목 권장 (15자 안팎)
 };
 
 // ============================================================================
@@ -581,6 +806,85 @@ export default function InstaAutoStudioPage() {
   const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<string>('자동 저장됨');
 
+  // ==========================================================================
+  // [1단계 신규] 주제 입력 → AI 기획안(최대 3개 비교) → 확인·승인·저장 상태
+  // 전체 흐름: 1) 주제 입력 → 2) AI 기획안 확인·승인 → 3) 사진 올리기 → 4) 자동 제작 → 5) 미리보기·수정 → 6) 캡션 → 7) 올리기/예약
+  // ==========================================================================
+  const [workflowStep, setWorkflowStep] = useState<1 | 2 | 3 | 4 | 5 | 6 | 7>(1);
+  const [planTopic, setPlanTopic] = useState<string>(
+    '만년필 입문자가 첫 만년필 고를 때 실패하지 않는 3가지 기준'
+  );
+  const [planTargetAudience, setPlanTargetAudience] = useState<string>('');
+  const [planPurpose, setPlanPurpose] = useState<string>(''); // '' | '정보 전달' | '공감' | '홍보' | '후기'
+  const [planTone, setPlanTone] = useState<string>(''); // '' | '친근하게' | '전문적으로' | '짧고 굵게'
+  const [planReferenceText, setPlanReferenceText] = useState<string>('');
+  const [planSlideCountOption, setPlanSlideCountOption] = useState<'auto' | number>('auto');
+  const [showOptionalPlanInputs, setShowOptionalPlanInputs] = useState<boolean>(true);
+
+  // 같은 주제로 최대 3개 기획안 비교 (기획안 1, 기획안 2, 기획안 3)
+  const [planCandidates, setPlanCandidates] = useState<AIPlanDocument[]>([]);
+  const [activePlanTabIdx, setActivePlanTabIdx] = useState<number>(0);
+  const [isGeneratingPlan, setIsGeneratingPlan] = useState<boolean>(false);
+  const [regeneratingCutIdx, setRegeneratingCutIdx] = useState<number | null>(null);
+
+  // 기획안 DB/로컬 저장 & 불러오기 모달 상태
+  const [savedPlansList, setSavedPlansList] = useState<AIPlanDocument[]>([]);
+  const [showSavedPlansModal, setShowSavedPlansModal] = useState<boolean>(false);
+  const [isSavingPlan, setIsSavingPlan] = useState<boolean>(false);
+  const [dailyAiUsedCount, setDailyAiUsedCount] = useState<number>(0);
+
+  // ==========================================================================
+  // [2단계, 3단계, 4단계 추가 제안 기능 A~G 상태]
+  // ==========================================================================
+  // 4-A. 계정별 브랜드 설정 (말투, 자주 쓰는 해시태그, 금지어, 마지막 고정 문구)
+  const [brandTone, setBrandTone] = useState<string>('친근하게');
+  const [brandFavoriteHashtags, setBrandFavoriteHashtags] = useState<string>(
+    '#인스타그램 #카드뉴스 #정보공유 #꿀팁 #일상'
+  );
+  const [brandForbiddenWords, setBrandForbiddenWords] = useState<string>('무조건, 100%, 완벽, 최고, 기적');
+  const [brandClosingSignature, setBrandClosingSignature] = useState<string>(
+    '📌 도움이 되셨다면 [저장]하고 언제든 다시 꺼내보세요!\n💬 더 궁금한 점은 댓글로 편하게 남겨주세요.'
+  );
+  const [showBrandModal, setShowBrandModal] = useState<boolean>(false);
+
+  // 4-C. 주제 아이디어 추천 10개
+  const [ideaKeyword, setIdeaKeyword] = useState<string>('');
+  const [recommendedIdeas, setRecommendedIdeas] = useState<string[]>([]);
+  const [isLoadingIdeas, setIsLoadingIdeas] = useState<boolean>(false);
+  const [showIdeasModal, setShowIdeasModal] = useState<boolean>(false);
+
+  // 4-D. 1편·2편·3편 시리즈 나누기
+  const [seriesParts, setSeriesParts] = useState<{ part1: string; part2: string; part3: string } | null>(null);
+  const [isLoadingSeries, setIsLoadingSeries] = useState<boolean>(false);
+  const [showSeriesModal, setShowSeriesModal] = useState<boolean>(false);
+
+  // 4-E. 글 품질 점검 & 사실 확인
+  const [showQualityModal, setShowQualityModal] = useState<boolean>(false);
+
+  // 4-F. 올리기 좋은 시간 추천
+  const [showBestTimesModal, setShowBestTimesModal] = useState<boolean>(false);
+
+  // 4-G. 내 템플릿 저장
+  interface UserSavedTemplate {
+    id: string;
+    name: string;
+    slideCount: number;
+    templateId: CardTemplateId;
+    accentColor: string;
+    fontId: string;
+    aspectRatio: AspectRatioKey;
+    photoFitMode: PhotoFitMode;
+    photoBgFillMode: PhotoBgFillMode;
+    createdAt: string;
+  }
+  const [savedUserTemplates, setSavedUserTemplates] = useState<UserSavedTemplate[]>([]);
+  const [newTemplateNameInput, setNewTemplateNameInput] = useState<string>('');
+  const [showTemplateModal, setShowTemplateModal] = useState<boolean>(false);
+
+  // 2단계 사진 연결 상태
+  const [isMatchingPhotos, setIsMatchingPhotos] = useState<boolean>(false);
+  const [photoOverlayDarkness, setPhotoOverlayDarkness] = useState<number>(72); // 0 ~ 100 (%)
+
   // 캡션 및 발행 상태
   const [captionTone, setCaptionTone] = useState<CaptionToneId>('friendly');
   const [baseCaption, setBaseCaption] = useState<string>(
@@ -727,6 +1031,77 @@ export default function InstaAutoStudioPage() {
         setUploadedPhotos(savedPhotos);
       }
 
+      // 2-B. [1단계] 저장된 기획안 목록 & 현재 작성 중이던 기획안 탭 복원
+      const savedPlans = await loadFromLocalDb<AIPlanDocument[]>(SAVED_PLANS_STORAGE_KEY);
+      if (savedPlans && Array.isArray(savedPlans) && !cancelled) {
+        setSavedPlansList(savedPlans);
+      }
+      const savedActivePlans = await loadFromLocalDb<{
+        planTopic?: string;
+        planTargetAudience?: string;
+        planPurpose?: string;
+        planTone?: string;
+        planReferenceText?: string;
+        planSlideCountOption?: 'auto' | number;
+        planCandidates?: AIPlanDocument[];
+        activePlanTabIdx?: number;
+        workflowStep?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+      }>('acs_active_plan_workspace_v1');
+      if (savedActivePlans && !cancelled) {
+        if (savedActivePlans.planTopic) setPlanTopic(savedActivePlans.planTopic);
+        if (savedActivePlans.planTargetAudience !== undefined)
+          setPlanTargetAudience(savedActivePlans.planTargetAudience);
+        if (savedActivePlans.planPurpose !== undefined) setPlanPurpose(savedActivePlans.planPurpose);
+        if (savedActivePlans.planTone !== undefined) setPlanTone(savedActivePlans.planTone);
+        if (savedActivePlans.planReferenceText !== undefined)
+          setPlanReferenceText(savedActivePlans.planReferenceText);
+        if (savedActivePlans.planSlideCountOption !== undefined)
+          setPlanSlideCountOption(savedActivePlans.planSlideCountOption);
+        if (Array.isArray(savedActivePlans.planCandidates) && savedActivePlans.planCandidates.length > 0) {
+          setPlanCandidates(savedActivePlans.planCandidates);
+          setActivePlanTabIdx(
+            Math.min(
+              savedActivePlans.activePlanTabIdx || 0,
+              savedActivePlans.planCandidates.length - 1
+            )
+          );
+        }
+        if (savedActivePlans.workflowStep) {
+          setWorkflowStep(savedActivePlans.workflowStep);
+        }
+      }
+
+      // 브랜드 설정 복원
+      const savedBrand = await loadFromLocalDb<{
+        tone?: string;
+        favoriteHashtags?: string;
+        forbiddenWords?: string;
+        closingSignature?: string;
+      }>('acs_brand_settings_v1');
+      if (savedBrand && !cancelled) {
+        if (savedBrand.tone) setBrandTone(savedBrand.tone);
+        if (savedBrand.favoriteHashtags) setBrandFavoriteHashtags(savedBrand.favoriteHashtags);
+        if (savedBrand.forbiddenWords) setBrandForbiddenWords(savedBrand.forbiddenWords);
+        if (savedBrand.closingSignature) setBrandClosingSignature(savedBrand.closingSignature);
+      }
+
+      // 내 템플릿 목록 복원
+      const savedTpls = await loadFromLocalDb<UserSavedTemplate[]>('acs_user_templates_v1');
+      if (savedTpls && Array.isArray(savedTpls) && !cancelled) {
+        setSavedUserTemplates(savedTpls);
+      }
+
+      // 하루 AI 사용량 카운트 복원
+      try {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const rawQuota = window.localStorage.getItem(`acs_daily_ai_${todayStr}`);
+        if (rawQuota) {
+          setDailyAiUsedCount(Number(rawQuota) || 0);
+        }
+      } catch {
+        // ignore
+      }
+
       // 3. 저장된 슬라이드 복원 (빈 캔버스 객체로 인해 미리보기가 안 나오는 문제 완벽 차단!)
       const savedState = await loadFromLocalDb<{
         slides: SlideItem[];
@@ -817,6 +1192,36 @@ export default function InstaAutoStudioPage() {
     if (!libsReady) return;
     saveToLocalDb('acs_uploaded_photos_v1', uploadedPhotos);
   }, [libsReady, uploadedPhotos]);
+
+  // [1단계] 기획안 작성 상태 자동 저장 (새로고침해도 유지)
+  useEffect(() => {
+    if (!libsReady) return;
+    const timer = setTimeout(() => {
+      saveToLocalDb('acs_active_plan_workspace_v1', {
+        planTopic,
+        planTargetAudience,
+        planPurpose,
+        planTone,
+        planReferenceText,
+        planSlideCountOption,
+        planCandidates,
+        activePlanTabIdx,
+        workflowStep,
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    libsReady,
+    planTopic,
+    planTargetAudience,
+    planPurpose,
+    planTone,
+    planReferenceText,
+    planSlideCountOption,
+    planCandidates,
+    activePlanTabIdx,
+    workflowStep,
+  ]);
 
   // ==========================================================================
   // 6) 모바일 / PC 화면 크기에 맞춰 캔버스 표시 배율(scale) 자동 계산 (ResizeObserver 적용)
@@ -1698,6 +2103,48 @@ export default function InstaAutoStudioPage() {
       );
       targetCanvas.add(bodyTextbox);
 
+      // [1단계 & 2단계 연동] "사진에 들어갈 글"(photoOverlayText)이 있으면
+      // 사진 위에서 글씨가 잘 읽히도록 반투명 어두운 막(#0F172A, opacity 0.68)을 깔고 흰색 굵은 글씨로 배치
+      if (slide.photoOverlayText && slide.photoOverlayText.trim()) {
+        const overlayStr = slide.photoOverlayText.trim();
+        const overlayBarW = innerW - 48;
+        const overlayBarH = 74;
+        const overlayBarLeft = pad + 24;
+        const overlayBarTop =
+          photoUrls.length > 0
+            ? tplId === 'bottom-photo-card'
+              ? ch - pad - 104
+              : 132 + Math.round(ch * 0.5) - 96
+            : Math.max(136, headlineTop - 98);
+
+        const overlayBar = new fabric.Rect({
+          left: overlayBarLeft,
+          top: overlayBarTop,
+          width: overlayBarW,
+          height: overlayBarH,
+          fill: '#0F172A',
+          opacity: 0.72,
+          rx: 18,
+          ry: 18,
+          customId: `photo-overlay-bg-${Date.now()}`,
+          customRole: 'photo-overlay-bg',
+        });
+        const overlayTxt = new fabric.Textbox(overlayStr, {
+          left: overlayBarLeft + 24,
+          top: overlayBarTop + 20,
+          width: overlayBarW - 48,
+          fontSize: 27,
+          fontFamily: fontId,
+          fontWeight: 'bold',
+          fill: '#FFFFFF',
+          textAlign: 'center',
+          customId: `photo-overlay-txt-${Date.now()}`,
+          customRole: 'photo-overlay-text',
+        });
+        targetCanvas.add(overlayBar);
+        targetCanvas.add(overlayTxt);
+      }
+
       if (showWatermark && watermarkText.trim()) {
         const wmTextbox = new fabric.Textbox(watermarkText.trim(), {
           left: pad,
@@ -1798,7 +2245,7 @@ export default function InstaAutoStudioPage() {
   // 12) [기능 1 핵심] 장별 제목·본문·뱃지 직접 입력 시 실시간으로 캔버스 미리보기 즉시 반영!
   // ==========================================================================
   function handleDirectSlideTextChange(
-    field: 'headline' | 'body' | 'badgeText',
+    field: 'headline' | 'body' | 'badgeText' | 'photoOverlayText',
     newValue: string
   ) {
     const canvas = fabricCanvasRef.current;
@@ -1808,6 +2255,7 @@ export default function InstaAutoStudioPage() {
         headline: 'headline',
         body: 'body',
         badgeText: 'badge-text',
+        photoOverlayText: 'photo-overlay-text',
       } as const;
       const targetRole = roleMap[field];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1848,14 +2296,44 @@ export default function InstaAutoStudioPage() {
         // 만약 사용자가 캔버스에서 해당 텍스트 박스를 지웠다면 새로 만들어 줌
         const cw = canvas.width || 1080;
         const ch = canvas.height || 1350;
+        if (field === 'photoOverlayText' && newValue.trim()) {
+          const barBg = new window.fabric.Rect({
+            left: 96,
+            top: Math.round(ch * 0.48),
+            width: cw - 192,
+            height: 74,
+            fill: '#0F172A',
+            opacity: 0.72,
+            rx: 18,
+            ry: 18,
+            customId: `photo-overlay-bg-${Date.now()}`,
+            customRole: 'photo-overlay-bg',
+          });
+          canvas.add(barBg);
+        }
         const newTb = new window.fabric.Textbox(newValue, {
           left: 104,
-          top: field === 'headline' ? Math.round(ch * 0.62) : field === 'body' ? Math.round(ch * 0.74) : 65,
+          top:
+            field === 'headline'
+              ? Math.round(ch * 0.62)
+              : field === 'body'
+              ? Math.round(ch * 0.74)
+              : field === 'photoOverlayText'
+              ? Math.round(ch * 0.48) + 20
+              : 65,
           width: cw - 208,
-          fontSize: field === 'headline' ? 50 : field === 'body' ? 29 : 24,
+          fontSize:
+            field === 'headline'
+              ? 50
+              : field === 'body'
+              ? 29
+              : field === 'photoOverlayText'
+              ? 27
+              : 24,
           fontFamily: fontId,
           fontWeight: field === 'body' ? 'normal' : 'bold',
-          fill: '#0F172A',
+          fill: field === 'photoOverlayText' ? '#FFFFFF' : '#0F172A',
+          textAlign: field === 'photoOverlayText' ? 'center' : 'left',
           customId: `${targetRole}-${Date.now()}`,
           customRole: targetRole,
         });
@@ -3120,6 +3598,1129 @@ export default function InstaAutoStudioPage() {
   }
 
   // ==========================================================================
+  // 18-B) [1단계 핵심 기능] 주제 → AI 컷별 기획안 만들기 · 3개 비교 · 직접 수정 · 저장/불러오기 · 승인(OK)
+  // ==========================================================================
+  const activePlan = planCandidates[activePlanTabIdx] || null;
+
+  function incrementDailyAiCounter(): boolean {
+    if (typeof window === 'undefined') return true;
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const key = `acs_daily_ai_${todayStr}`;
+      const used = Number(window.localStorage.getItem(key) || '0') || 0;
+      if (used >= DAILY_AI_LIMIT_MAX) {
+        showToast(
+          `⚠️ 오늘의 AI 무료 기획/생성 한도(${DAILY_AI_LIMIT_MAX}회)를 모두 사용했어요. 직접 수정하거나 내일 다시 이용해 주세요!`
+        );
+        return false;
+      }
+      const next = used + 1;
+      window.localStorage.setItem(key, String(next));
+      setDailyAiUsedCount(next);
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
+  // [기획안 생성] mode === 'new': 첫 기획안 또는 전체 다시 기획하기 / mode === 'compare': 같은 주제로 비교 기획안 추가 (최대 3개)
+  async function handleGenerateAIPlan(mode: 'new' | 'compare' = 'new') {
+    const cleanTopic = planTopic.trim();
+    if (!cleanTopic) {
+      showToast('⚠️ 먼저 [1. 주제 입력] 칸에 카드뉴스 주제를 한 줄로 적어주세요!');
+      return;
+    }
+
+    if (mode === 'compare' && planCandidates.length >= 3) {
+      showToast('⚠️ 같은 주제로는 최대 3개의 기획안까지만 만들어 비교할 수 있어요.');
+      return;
+    }
+
+    // "전체 다시 기획하기"일 때 내가 직접 고친 컷이 있으면 확인창 표시
+    if (mode === 'new' && activePlan) {
+      const hasEditedCut = activePlan.cuts.some((c) => c.isManuallyEdited);
+      if (
+        hasEditedCut &&
+        !window.confirm(
+          '직접 고친 내용이 사라져요.\n그래도 현재 기획안을 AI로 전체 다시 기획할까요?'
+        )
+      ) {
+        return;
+      }
+    }
+
+    if (!incrementDailyAiCounter()) return;
+
+    const targetVariantIdx =
+      mode === 'compare' ? planCandidates.length : activePlan ? activePlanTabIdx : 0;
+
+    setIsGeneratingPlan(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode: 'generate_plan',
+          topic: cleanTopic,
+          targetAudience: planTargetAudience.trim(),
+          purpose: planPurpose,
+          tone: planTone,
+          referenceText: planReferenceText.trim(),
+          slideCountOption: planSlideCountOption,
+          maxSlides: maxSlideLimit,
+          variantIndex: targetVariantIdx,
+          // 구버전 서버 API 호환용 필드 함께 전송
+          rawText: `[주제] ${cleanTopic}\n${planTargetAudience ? `[대상] ${planTargetAudience}\n` : ''}${
+            planPurpose ? `[목적] ${planPurpose}\n` : ''
+          }${planReferenceText ? `[참고자료] ${planReferenceText}` : ''}`,
+          slideCount:
+            planSlideCountOption === 'auto'
+              ? 5
+              : Math.min(maxSlideLimit, Number(planSlideCountOption) || 5),
+        }),
+      });
+
+      const data = await res.json();
+      let generatedPlan: AIPlanDocument | null = null;
+
+      if (res.ok && data.plan && Array.isArray(data.plan.cuts)) {
+        generatedPlan = {
+          ...data.plan,
+          label: `기획안 ${targetVariantIdx + 1}`,
+          cuts: data.plan.cuts.slice(0, maxSlideLimit).map((c: PlanCutItem, idx: number) => ({
+            ...c,
+            id: c.id || `cut-${Date.now()}-${idx + 1}`,
+            slideNumber: idx + 1,
+            isManuallyEdited: false,
+          })),
+        };
+      } else if (res.ok && Array.isArray(data.slides) && data.slides.length > 0) {
+        // 만약 서버에 구버전 API만 배포되어 있어 data.slides로 응답한 경우에도 완벽한 기획안(AIPlanDocument)으로 변환!
+        const fallbackBase = buildClientFallbackPlan({
+          topic: cleanTopic,
+          targetAudience: planTargetAudience,
+          purpose: planPurpose,
+          tone: planTone,
+          referenceText: planReferenceText,
+          slideCountOption: planSlideCountOption,
+          variantIndex: targetVariantIdx,
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const convertedCuts: PlanCutItem[] = data.slides.slice(0, maxSlideLimit).map((s: any, idx: number) => {
+          const baseCut =
+            fallbackBase.cuts[idx] ||
+            buildClientFallbackSingleCut({
+              topic: cleanTopic,
+              slideNumber: idx + 1,
+              totalSlides: data.slides.length,
+            });
+          return {
+            ...baseCut,
+            id: `cut-${Date.now()}-${idx + 1}`,
+            slideNumber: idx + 1,
+            headline: s.headline || baseCut.headline,
+            body: s.body || baseCut.body,
+            isManuallyEdited: false,
+          };
+        });
+        const firstHeadline = convertedCuts[0]?.headline || fallbackBase.coverTitleCandidates[0];
+        generatedPlan = {
+          ...fallbackBase,
+          label: `기획안 ${targetVariantIdx + 1}`,
+          coverTitleCandidates: [
+            firstHeadline,
+            fallbackBase.coverTitleCandidates[1],
+            fallbackBase.coverTitleCandidates[2],
+          ],
+          recommendedSlideCount: convertedCuts.length,
+          cuts: convertedCuts,
+        };
+      } else {
+        // 네트워크/서버 오류 시에도 중단되지 않도록 클라이언트 스마트 기획안 생성
+        generatedPlan = buildClientFallbackPlan({
+          topic: cleanTopic,
+          targetAudience: planTargetAudience,
+          purpose: planPurpose,
+          tone: planTone,
+          referenceText: planReferenceText,
+          slideCountOption: planSlideCountOption,
+          variantIndex: targetVariantIdx,
+        });
+      }
+
+      if (generatedPlan) {
+        if (mode === 'compare') {
+          const nextList = [...planCandidates, generatedPlan].slice(0, 3);
+          setPlanCandidates(nextList);
+          setActivePlanTabIdx(nextList.length - 1);
+          showToast(
+            `✨ [${generatedPlan.label}]이 추가되었습니다! 상단 탭을 눌러 최대 3개 기획안을 비교해 보세요.`
+          );
+        } else if (planCandidates.length === 0) {
+          setPlanCandidates([generatedPlan]);
+          setActivePlanTabIdx(0);
+          showToast(
+            '✨ AI 기획안이 완성되었습니다! 표지 제목 후보 3개와 컷별 구성을 확인하고 수정해 보세요.'
+          );
+        } else {
+          const nextList = planCandidates.map((p, idx) =>
+            idx === activePlanTabIdx ? { ...generatedPlan!, label: p.label } : p
+          );
+          setPlanCandidates(nextList);
+          showToast(`✨ [${activePlan?.label || '기획안'}]을 새로 기획했습니다!`);
+        }
+        setWorkflowStep(2);
+        setRawText(cleanTopic);
+      }
+    } catch {
+      const fallbackPlan = buildClientFallbackPlan({
+        topic: cleanTopic,
+        targetAudience: planTargetAudience,
+        purpose: planPurpose,
+        tone: planTone,
+        referenceText: planReferenceText,
+        slideCountOption: planSlideCountOption,
+        variantIndex: targetVariantIdx,
+      });
+      if (mode === 'compare') {
+        const nextList = [...planCandidates, fallbackPlan].slice(0, 3);
+        setPlanCandidates(nextList);
+        setActivePlanTabIdx(nextList.length - 1);
+      } else if (planCandidates.length === 0) {
+        setPlanCandidates([fallbackPlan]);
+        setActivePlanTabIdx(0);
+      } else {
+        setPlanCandidates((prev) =>
+          prev.map((p, idx) => (idx === activePlanTabIdx ? { ...fallbackPlan, label: p.label } : p))
+        );
+      }
+      setWorkflowStep(2);
+      showToast('✨ AI 기획안 초안이 준비되었습니다! 내용을 확인하고 자유롭게 수정해 보세요.');
+    } finally {
+      setIsGeneratingPlan(false);
+    }
+  }
+
+  // [표지 제목 후보 3개 중 1개 선택] → 선택 즉시 1번 컷(표지)의 제목에 반영
+  function handleSelectCoverCandidate(candidateIdx: number) {
+    if (!activePlan) return;
+    const chosenTitle = activePlan.coverTitleCandidates[candidateIdx];
+    if (!chosenTitle) return;
+
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        const nextCuts = p.cuts.map((c, cIdx) =>
+          cIdx === 0 ? { ...c, headline: chosenTitle } : c
+        );
+        return {
+          ...p,
+          selectedCoverCandidateIndex: candidateIdx,
+          cuts: nextCuts,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+    showToast(`📌 표지 제목 후보 ${candidateIdx + 1}번으로 1장 제목을 바꿨어요!`);
+  }
+
+  // [표지 제목 후보 직접 수정]
+  function handleEditCoverCandidateText(candidateIdx: number, newText: string) {
+    if (!activePlan) return;
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        const nextCandidates: [string, string, string] = [...p.coverTitleCandidates] as [
+          string,
+          string,
+          string,
+        ];
+        nextCandidates[candidateIdx] = newText;
+        const nextCuts =
+          p.selectedCoverCandidateIndex === candidateIdx
+            ? p.cuts.map((c, cIdx) => (cIdx === 0 ? { ...c, headline: newText, isManuallyEdited: true } : c))
+            : p.cuts;
+        return {
+          ...p,
+          coverTitleCandidates: nextCandidates,
+          cuts: nextCuts,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+  }
+
+  // [컷별 내용 직접 수정] (역할 / 제목 / 짧은 본문 / 사진에 들어갈 글 / 이 컷에 어울리는 사진 가이드)
+  function handleUpdatePlanCutField(
+    cutIdx: number,
+    field: keyof Pick<
+      PlanCutItem,
+      'roleType' | 'headline' | 'body' | 'photoOverlayText' | 'photoGuide'
+    >,
+    value: string
+  ) {
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        const nextCuts = p.cuts.map((c, idx) =>
+          idx === cutIdx
+            ? {
+                ...c,
+                [field]: value,
+                isManuallyEdited: true,
+              }
+            : c
+        );
+        return {
+          ...p,
+          cuts: nextCuts,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+  }
+
+  // [기획안에서 컷 추가] (MAX_SLIDES 제한 준수)
+  function handleAddCutToPlan() {
+    if (!activePlan) return;
+    if (activePlan.cuts.length >= maxSlideLimit) {
+      showToast(`⚠️ 최대 ${maxSlideLimit}장까지만 추가할 수 있습니다.`);
+      return;
+    }
+    const nextSlideNum = activePlan.cuts.length + 1;
+    const newCut: PlanCutItem = {
+      id: `cut-added-${Date.now()}`,
+      slideNumber: nextSlideNum,
+      roleType: '핵심 정보',
+      headline: `추가 핵심 포인트 ${nextSlideNum}`,
+      body: `여기에 ${nextSlideNum}번째 컷에 들어갈 짧은 본문(2~3줄)을 적어주세요.`,
+      photoOverlayText: `핵심 포인트 #${nextSlideNum}`,
+      photoGuide: '내용을 잘 보여주는 선명한 사진이나 클로즈업 사진',
+      isManuallyEdited: true,
+    };
+
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        // 만약 기존 마지막 장이 '마무리·행동 유도'였다면 그 앞자리에 넣으면 흐름이 더 자연스러움
+        const cutsCopy = [...p.cuts];
+        const insertPos =
+          cutsCopy.length >= 2 && cutsCopy[cutsCopy.length - 1].roleType === '마무리·행동 유도'
+            ? cutsCopy.length - 1
+            : cutsCopy.length;
+        cutsCopy.splice(insertPos, 0, newCut);
+        const renumbered = cutsCopy.map((c, i) => ({ ...c, slideNumber: i + 1 }));
+        return {
+          ...p,
+          cuts: renumbered,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+    showToast(`➕ 새 컷이 추가되었습니다! (전체 ${activePlan.cuts.length + 1}장)`);
+  }
+
+  // [기획안에서 컷 삭제]
+  function handleDeleteCutFromPlan(cutIdx: number) {
+    if (!activePlan) return;
+    if (activePlan.cuts.length <= 1) {
+      showToast('⚠️ 최소 1장의 컷은 있어야 합니다.');
+      return;
+    }
+    const targetCut = activePlan.cuts[cutIdx];
+    if (
+      targetCut?.isManuallyEdited &&
+      !window.confirm(`${cutIdx + 1}번 컷에 직접 수정한 내용이 있습니다. 정말 삭제할까요?`)
+    ) {
+      return;
+    }
+
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        const filtered = p.cuts
+          .filter((_, idx) => idx !== cutIdx)
+          .map((c, idx) => ({ ...c, slideNumber: idx + 1 }));
+        return {
+          ...p,
+          cuts: filtered,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+    showToast(`🗑️ ${cutIdx + 1}번 컷을 삭제했습니다.`);
+  }
+
+  // [기획안에서 컷 순서 바꾸기] (앞으로 / 뒤로)
+  function handleMovePlanCutOrder(cutIdx: number, direction: 'up' | 'down') {
+    if (!activePlan) return;
+    const targetIdx = direction === 'up' ? cutIdx - 1 : cutIdx + 1;
+    if (targetIdx < 0 || targetIdx >= activePlan.cuts.length) return;
+
+    setPlanCandidates((prev) =>
+      prev.map((p, pIdx) => {
+        if (pIdx !== activePlanTabIdx) return p;
+        const copy = [...p.cuts];
+        const [moved] = copy.splice(cutIdx, 1);
+        copy.splice(targetIdx, 0, moved);
+        const renumbered = copy.map((c, idx) => ({ ...c, slideNumber: idx + 1 }));
+        return {
+          ...p,
+          cuts: renumbered,
+          updatedAt: new Date().toISOString(),
+        };
+      })
+    );
+  }
+
+  // [기획안 "이 컷만 다시 쓰기"] (내가 직접 고친 컷이면 "직접 고친 내용이 사라져요" 확인창 띄움!)
+  async function handleRegenerateSinglePlanCut(cutIdx: number) {
+    if (!activePlan) return;
+    const targetCut = activePlan.cuts[cutIdx];
+    if (!targetCut) return;
+
+    if (targetCut.isManuallyEdited) {
+      const ok = window.confirm(
+        `직접 고친 내용이 사라져요.\n${cutIdx + 1}번 컷을 AI로 다시 쓸까요?`
+      );
+      if (!ok) return;
+    }
+
+    setRegeneratingCutIdx(cutIdx);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          mode: 'regenerate_cut',
+          topic: activePlan.topic || planTopic,
+          slideNumber: cutIdx + 1,
+          totalSlides: activePlan.cuts.length,
+          roleType: targetCut.roleType,
+          targetAudience: activePlan.targetAudience || planTargetAudience,
+          purpose: activePlan.purpose || planPurpose,
+          tone: activePlan.tone || planTone,
+          currentHeadline: targetCut.headline,
+          currentBody: targetCut.body,
+        }),
+      });
+      const data = await res.json();
+      let nextCut: PlanCutItem;
+
+      if (res.ok && data.cut) {
+        nextCut = {
+          ...targetCut,
+          ...data.cut,
+          id: targetCut.id,
+          slideNumber: cutIdx + 1,
+          isManuallyEdited: false,
+        };
+      } else {
+        nextCut = {
+          ...buildClientFallbackSingleCut({
+            topic: activePlan.topic || planTopic,
+            slideNumber: cutIdx + 1,
+            totalSlides: activePlan.cuts.length,
+            roleType: targetCut.roleType,
+          }),
+          id: targetCut.id,
+        };
+      }
+
+      setPlanCandidates((prev) =>
+        prev.map((p, pIdx) => {
+          if (pIdx !== activePlanTabIdx) return p;
+          return {
+            ...p,
+            cuts: p.cuts.map((c, idx) => (idx === cutIdx ? nextCut : c)),
+            updatedAt: new Date().toISOString(),
+          };
+        })
+      );
+      showToast(`✨ ${cutIdx + 1}번 컷(${targetCut.roleType})을 AI가 새로 작성했어요!`);
+    } catch {
+      const fallbackCut = buildClientFallbackSingleCut({
+        topic: activePlan.topic || planTopic,
+        slideNumber: cutIdx + 1,
+        totalSlides: activePlan.cuts.length,
+        roleType: targetCut.roleType,
+      });
+      setPlanCandidates((prev) =>
+        prev.map((p, pIdx) => {
+          if (pIdx !== activePlanTabIdx) return p;
+          return {
+            ...p,
+            cuts: p.cuts.map((c, idx) => (idx === cutIdx ? { ...fallbackCut, id: c.id } : c)),
+            updatedAt: new Date().toISOString(),
+          };
+        })
+      );
+      showToast(`✨ ${cutIdx + 1}번 컷을 새로 작성했어요!`);
+    } finally {
+      setRegeneratingCutIdx(null);
+    }
+  }
+
+  // [기획안 DB + 브라우저 저장] 나중에 언제든 불러와서 이어서 제작 가능
+  async function handleSaveCurrentPlan() {
+    if (!activePlan) {
+      showToast('⚠️ 먼저 AI 기획안을 생성해 주세요.');
+      return;
+    }
+
+    setIsSavingPlan(true);
+    try {
+      const updatedPlan: AIPlanDocument = {
+        ...activePlan,
+        updatedAt: new Date().toISOString(),
+      };
+
+      // 1. 로컬 IndexedDB / localForage에 즉시 저장
+      const existingIdx = savedPlansList.findIndex((p) => p.id === updatedPlan.id);
+      const nextSavedList =
+        existingIdx >= 0
+          ? savedPlansList.map((p, i) => (i === existingIdx ? updatedPlan : p))
+          : [updatedPlan, ...savedPlansList].slice(0, 30);
+
+      setSavedPlansList(nextSavedList);
+      await saveToLocalDb(SAVED_PLANS_STORAGE_KEY, nextSavedList);
+
+      // 2. 로그인되어 있으면 Supabase public.plans 테이블에도 저장 시도
+      if (userId) {
+        try {
+          const supabase = getSupabaseBrowser();
+          await supabase.from('plans').upsert(
+            {
+              user_id: userId,
+              topic: updatedPlan.topic,
+              target_audience: updatedPlan.targetAudience || '',
+              purpose: updatedPlan.purpose || '',
+              tone: updatedPlan.tone || '',
+              reference_text: updatedPlan.referenceText || '',
+              slide_count: updatedPlan.cuts.length,
+              selected_cover_index: updatedPlan.selectedCoverCandidateIndex,
+              cover_candidates: updatedPlan.coverTitleCandidates,
+              recommendation_reason: updatedPlan.recommendationReason,
+              cuts_json: updatedPlan.cuts,
+              plan_group_json: planCandidates,
+              status: updatedPlan.isApproved ? 'approved' : 'draft',
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'id' }
+          );
+        } catch {
+          // DB 테이블 생성 전이거나 오프라인이어도 로컬 저장소로 완벽 작동
+        }
+      }
+
+      showToast('💾 기획안이 안전하게 저장되었습니다! [저장된 기획안 불러오기]에서 언제든 이어서 만들 수 있어요.');
+    } finally {
+      setIsSavingPlan(false);
+    }
+  }
+
+  // [저장된 기획안 목록 불러오기 (Supabase DB + 로컬 병합)]
+  async function handleOpenSavedPlansModal() {
+    setShowSavedPlansModal(true);
+    const localList = (await loadFromLocalDb<AIPlanDocument[]>(SAVED_PLANS_STORAGE_KEY)) || [];
+    let merged = [...localList];
+
+    if (userId) {
+      try {
+        const supabase = getSupabaseBrowser();
+        const { data } = await supabase
+          .from('plans')
+          .select('*')
+          .eq('user_id', userId)
+          .order('updated_at', { ascending: false })
+          .limit(20);
+
+        if (Array.isArray(data) && data.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const dbPlans: AIPlanDocument[] = data.map((row: any) => ({
+            id: String(row.id),
+            label: '저장된 기획안',
+            topic: row.topic || '제목 없는 기획안',
+            targetAudience: row.target_audience || '',
+            purpose: row.purpose || '',
+            tone: row.tone || '',
+            referenceText: row.reference_text || '',
+            coverTitleCandidates: Array.isArray(row.cover_candidates) && row.cover_candidates.length >= 3
+              ? [row.cover_candidates[0], row.cover_candidates[1], row.cover_candidates[2]]
+              : ['표지 후보 1', '표지 후보 2', '표지 후보 3'],
+            selectedCoverCandidateIndex: Number(row.selected_cover_index) || 0,
+            recommendedSlideCount: Number(row.slide_count) || 5,
+            recommendationReason: row.recommendation_reason || '',
+            cuts: Array.isArray(row.cuts_json) ? row.cuts_json : [],
+            isApproved: row.status === 'approved',
+            createdAt: row.created_at || new Date().toISOString(),
+            updatedAt: row.updated_at || new Date().toISOString(),
+          }));
+
+          const existingIds = new Set(merged.map((p) => p.id));
+          for (const dbp of dbPlans) {
+            if (!existingIds.has(dbp.id)) {
+              merged.push(dbp);
+            }
+          }
+        }
+      } catch {
+        // ignore if table not yet created
+      }
+    }
+
+    setSavedPlansList(merged);
+  }
+
+  // [저장된 기획안 선택하여 불러오기]
+  function handleLoadPlanFromSaved(planItem: AIPlanDocument) {
+    setPlanTopic(planItem.topic);
+    setPlanTargetAudience(planItem.targetAudience || '');
+    setPlanPurpose(planItem.purpose || '');
+    setPlanTone(planItem.tone || '');
+    setPlanReferenceText(planItem.referenceText || '');
+    setPlanCandidates([{ ...planItem, label: '기획안 1' }]);
+    setActivePlanTabIdx(0);
+    setWorkflowStep(2);
+    setShowSavedPlansModal(false);
+    showToast(`📂 [${planItem.topic}] 기획안을 불러왔습니다! 이어서 수정하거나 승인해 보세요.`);
+  }
+
+  // [저장된 기획안 삭제]
+  async function handleDeleteSavedPlan(planId: string) {
+    const next = savedPlansList.filter((p) => p.id !== planId);
+    setSavedPlansList(next);
+    await saveToLocalDb(SAVED_PLANS_STORAGE_KEY, next);
+    if (userId) {
+      try {
+        const supabase = getSupabaseBrowser();
+        await supabase.from('plans').delete().eq('id', planId);
+      } catch {
+        // ignore
+      }
+    }
+    showToast('🗑️ 저장된 기획안을 삭제했습니다.');
+  }
+
+  // [기획안 승인(OK) → 제작 단계로 넘어가기 (슬라이드 & 캔버스에 즉시 반영!)]
+  function handleApprovePlanAndApplyToSlides() {
+    if (!activePlan || activePlan.cuts.length === 0) {
+      showToast('⚠️ 먼저 기획안을 생성해 주세요.');
+      return;
+    }
+
+    const roleBadgeMap: Record<PlanCutRoleLabel, string> = {
+      표지: 'COVER',
+      공감: 'EMPATHY',
+      '핵심 정보': 'KEY POINT',
+      예시: 'EXAMPLE',
+      요약: 'SUMMARY',
+      '마무리·행동 유도': 'ACTION',
+    };
+
+    const nextSlides: SlideItem[] = activePlan.cuts.slice(0, maxSlideLimit).map((cut, idx) => {
+      const existingSlide = slides[idx];
+      const fallbackPhoto = uploadedPhotos[idx] || null;
+      const keepPhotoUrls =
+        existingSlide?.photoUrls && existingSlide.photoUrls.length > 0
+          ? existingSlide.photoUrls
+          : fallbackPhoto
+          ? [fallbackPhoto.url]
+          : [];
+
+      return {
+        id: `slide-from-plan-${Date.now()}-${idx}`,
+        slideNumber: idx + 1,
+        role:
+          cut.roleType === '표지'
+            ? 'cover'
+            : cut.roleType === '마무리·행동 유도'
+            ? 'cta'
+            : 'body',
+        roleLabel: cut.roleType,
+        badgeText: `${roleBadgeMap[cut.roleType] || 'POINT'} 0${idx + 1} · ${cut.roleType}`,
+        headline: cut.headline,
+        body: cut.body,
+        photoOverlayText: cut.photoOverlayText || '',
+        photoGuide: cut.photoGuide || '',
+        photoIndex: fallbackPhoto ? idx : null,
+        photoUrl: keepPhotoUrls[0] || null,
+        photoIndices: fallbackPhoto ? [idx] : [],
+        photoUrls: keepPhotoUrls,
+        templateId: existingSlide?.templateId || templateId,
+        photoFitMode: existingSlide?.photoFitMode || 'contain',
+        photoBgFillMode: existingSlide?.photoBgFillMode || 'solid',
+        isManuallyEdited: Boolean(cut.isManuallyEdited),
+        fabricJson: undefined,
+      };
+    });
+
+    // 승인 상태로 표시
+    setPlanCandidates((prev) =>
+      prev.map((p, idx) =>
+        idx === activePlanTabIdx ? { ...p, isApproved: true, updatedAt: new Date().toISOString() } : p
+      )
+    );
+
+    historyMapRef.current = {};
+    redoMapRef.current = {};
+    setSlides(nextSlides);
+    setSlideCount(nextSlides.length);
+    setActiveSlideIndex(0);
+    setRawText(activePlan.topic);
+    setWorkflowStep(3);
+    setCanvasRebuildTick((t) => t + 1);
+
+    showToast(
+      `✅ [${activePlan.label}] 승인 완료! 총 ${nextSlides.length}장의 카드뉴스 초안과 오른쪽 미리보기에 모두 반영되었습니다.`
+    );
+  }
+
+  // ==========================================================================
+  // [2단계 핵심] 사진 가이드에 맞춘 자동 배정 · 사진 필요 컷 안내 · 남은 사진 보관함
+  // ==========================================================================
+  // 컷에 사용되지 않고 남은 사진 목록 계산
+  const assignedPhotoUrls = new Set(
+    slides.flatMap((s) => s.photoUrls || (s.photoUrl ? [s.photoUrl] : []))
+  );
+  const remainingPhotos = uploadedPhotos.filter((p) => !assignedPhotoUrls.has(p.url));
+
+  // 2단계 사진 가이드 기반 스마트 자동 배정
+  async function handleAutoMatchPhotosToCuts() {
+    if (uploadedPhotos.length === 0) {
+      showToast('⚠️ 먼저 [내 사진 업로드]로 사진을 1장 이상 올려주세요.');
+      return;
+    }
+
+    setIsMatchingPhotos(true);
+    try {
+      // 사진 가이드 키워드와 파일명 매칭 또는 순차 최적 배정
+      const nextSlides = slides.map((s, idx) => {
+        // 이미 사용자가 직접 넣은 사진이 있는 장은 그대로 보존
+        if (s.photoUrls && s.photoUrls.length > 0 && s.isManuallyEdited) {
+          return s;
+        }
+
+        const guide = (s.photoGuide || '').toLowerCase();
+        let matchedPhoto = uploadedPhotos.find((p, pIdx) => {
+          if (assignedPhotoUrls.has(p.url) && pIdx !== idx) return false;
+          const pName = (p.name || '').toLowerCase();
+          return (
+            (guide.includes('표지') && (pName.includes('cover') || pName.includes('표지'))) ||
+            (guide.includes('제품') && (pName.includes('product') || pName.includes('제품'))) ||
+            (guide.includes('풍경') && (pName.includes('view') || pName.includes('풍경'))) ||
+            (guide.includes('인물') && (pName.includes('person') || pName.includes('인물')))
+          );
+        });
+
+        if (!matchedPhoto && uploadedPhotos[idx]) {
+          matchedPhoto = uploadedPhotos[idx];
+        }
+
+        const pUrl = matchedPhoto ? matchedPhoto.url : null;
+        return {
+          ...s,
+          photoIndex: matchedPhoto ? uploadedPhotos.indexOf(matchedPhoto) : null,
+          photoUrl: pUrl,
+          photoIndices: matchedPhoto ? [uploadedPhotos.indexOf(matchedPhoto)] : [],
+          photoUrls: pUrl ? [pUrl] : [],
+          fabricJson: undefined, // 캔버스 다시 렌더링 유도
+        };
+      });
+
+      setSlides(nextSlides);
+      setCanvasRebuildTick((t) => t + 1);
+      showToast('🤖 기획안의 사진 가이드에 맞춰 사진을 최적으로 배정했습니다!');
+    } finally {
+      setIsMatchingPhotos(false);
+    }
+  }
+
+  // 특정 컷에 남은 사진 배정
+  function handleAssignRemainingPhotoToSlide(slideIdx: number, photoUrl: string) {
+    setSlides((prev) =>
+      prev.map((s, idx) =>
+        idx === slideIdx
+          ? {
+              ...s,
+              photoUrl,
+              photoUrls: [photoUrl],
+              isManuallyEdited: true,
+              fabricJson: undefined,
+            }
+          : s
+      )
+    );
+    setCanvasRebuildTick((t) => t + 1);
+    showToast(`📷 ${slideIdx + 1}장에 사진을 넣었습니다!`);
+  }
+
+  // 특정 컷을 "글 전용 디자인"으로 만들기 (사진 제거)
+  function handleMakeSlideTextOnly(slideIdx: number) {
+    setSlides((prev) =>
+      prev.map((s, idx) =>
+        idx === slideIdx
+          ? {
+              ...s,
+              photoUrl: null,
+              photoUrls: [],
+              photoIndices: [],
+              photoIndex: null,
+              isManuallyEdited: true,
+              fabricJson: undefined,
+            }
+          : s
+      )
+    );
+    setCanvasRebuildTick((t) => t + 1);
+    showToast(`📝 ${slideIdx + 1}장을 깔끔한 글 전용 디자인으로 변경했습니다.`);
+  }
+
+  // ==========================================================================
+  // [3단계 핵심] 기획안/슬라이드 바탕 캡션·해시태그 AI 자동 생성 (첫 줄 시선 집중 훅 문구)
+  // ==========================================================================
+  async function handleGenerateSmartCaptionWithAI() {
+    const mainTopic = planTopic || activePlan?.topic || '오늘의 꿀팁 가이드';
+    const firstCutHeadline = slides[0]?.headline || activePlan?.cuts[0]?.headline || mainTopic;
+
+    // 첫 줄 시선 집중 한 줄 훅 문구 후보
+    const hookPhrases = [
+      `🚨 아직도 "${firstCutHeadline.replace(/^[0-9\.\s]+/, '')}" 모르고 지나치셨나요? (더보기 클릭 👇)`,
+      `👀 피드 넘기다 멈춘 분들 필독! 딱 1분 만에 끝내는 ${mainTopic} 💡`,
+      `📌 나중에 찾으려 하면 꼭 없는 ${mainTopic}! 지금 저장하고 확인하세요 👇`,
+    ];
+    const chosenHook = hookPhrases[Math.floor(Math.random() * hookPhrases.length)];
+
+    const cutSummaries = slides
+      .map((s, i) => `${i + 1}장. ${s.headline || ''} - ${s.body ? s.body.replace(/\n/g, ' ') : ''}`)
+      .filter((line) => line.length > 5)
+      .join('\n');
+
+    const generatedCaption = `${chosenHook}
+
+${cutSummaries}
+
+${brandClosingSignature || '📌 도움이 되셨다면 [저장]하고 언제든 다시 꺼내보세요!\n💬 더 궁금한 점은 댓글로 편하게 남겨주세요.'}
+
+${brandFavoriteHashtags || '#인스타그램 #카드뉴스 #정보공유 #꿀팁 #일상'}`;
+
+    setBaseCaption(generatedCaption);
+    showToast('✨ 첫 줄 시선 집중 문구와 함께 캡션·해시태그가 자동 완성되었습니다!');
+  }
+
+  // ==========================================================================
+  // [4단계 추가 기능 A~G]
+  // ==========================================================================
+  // 4-A. 브랜드 설정 저장
+  async function handleSaveBrandSettings() {
+    await saveToLocalDb('acs_brand_settings_v1', {
+      tone: brandTone,
+      favoriteHashtags: brandFavoriteHashtags,
+      forbiddenWords: brandForbiddenWords,
+      closingSignature: brandClosingSignature,
+    });
+    if (userId) {
+      try {
+        const supabase = getSupabaseBrowser();
+        await supabase.from('brand_settings').upsert(
+          {
+            user_id: userId,
+            tone: brandTone,
+            favorite_hashtags: brandFavoriteHashtags,
+            forbidden_words: brandForbiddenWords,
+            closing_signature: brandClosingSignature,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id' }
+        );
+      } catch {
+        // ignore
+      }
+    }
+    setShowBrandModal(false);
+    showToast('🏷️ 계정 브랜드 설정이 안전하게 저장되었습니다!');
+  }
+
+  // 4-B. 사실 확인 (Fact Check) 검사
+  const factCheckAlerts = (() => {
+    const list: { slideNum: number; text: string; phrase: string }[] = [];
+    const factRegex = /([0-9]+%|[0-9]+원|[0-9]+만\s*원|[0-9]+가지|[0-9]{4}년|[0-9]+배|[0-9]+위)/g;
+    slides.forEach((s) => {
+      const full = `${s.headline} ${s.body}`;
+      const matches = full.match(factRegex);
+      if (matches) {
+        matches.forEach((m) => {
+          list.push({ slideNum: s.slideNumber, text: full.slice(0, 45) + '...', phrase: m });
+        });
+      }
+    });
+    return list;
+  })();
+
+  // 4-C. 주제 아이디어 10개 추천
+  async function handleFetchTopicIdeas() {
+    const kw = ideaKeyword.trim() || planTopic || '일상 꿀팁';
+    setIsLoadingIdeas(true);
+    try {
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'recommend_topics', keyword: kw }),
+      });
+      const data = await res.json();
+      if (Array.isArray(data.ideas) && data.ideas.length > 0) {
+        setRecommendedIdeas(data.ideas);
+      } else {
+        setRecommendedIdeas([
+          `${kw} 입문자가 가장 많이 하는 실수 TOP 3`,
+          `모르면 손해 보는 ${kw} 핵심 꿀팁`,
+          `전문가가 알려주는 ${kw} 선택 기준 3가지`,
+          `3분 만에 끝내는 ${kw} 완벽 가이드`,
+          `가성비 최고로 소문난 ${kw} 추천 리스트`,
+          `직접 써보고 느낀 ${kw} 솔직 장단점`,
+          `요즘 인기 급상승 중인 ${kw} 트렌드`,
+          `실패 없이 시작하는 ${kw} 첫걸음`,
+          `바쁜 직장인을 위한 ${kw} 초간단 활용법`,
+          `이것만 챙겨도 성공하는 ${kw} 체크리스트`,
+        ]);
+      }
+    } catch {
+      setRecommendedIdeas([
+        `${kw} 입문자가 가장 많이 하는 실수 TOP 3`,
+        `모르면 손해 보는 ${kw} 핵심 꿀팁`,
+        `전문가가 알려주는 ${kw} 선택 기준 3가지`,
+        `3분 만에 끝내는 ${kw} 완벽 가이드`,
+        `가성비 최고로 소문난 ${kw} 추천 리스트`,
+        `직접 써보고 느낀 ${kw} 솔직 장단점`,
+        `요즘 인기 급상승 중인 ${kw} 트렌드`,
+        `실패 없이 시작하는 ${kw} 첫걸음`,
+        `바쁜 직장인을 위한 ${kw} 초간단 활용법`,
+        `이것만 챙겨도 성공하는 ${kw} 체크리스트`,
+      ]);
+    } finally {
+      setIsLoadingIdeas(false);
+    }
+  }
+
+  function handleSelectRecommendedIdea(idea: string) {
+    setPlanTopic(idea);
+    setShowIdeasModal(false);
+    showToast(`💡 주제가 "${idea}"로 설정되었습니다! 이제 [AI 기획안 만들기]를 눌러보세요.`);
+  }
+
+  // 4-D. 1편·2편·3편 시리즈 나누기
+  async function handleSplitSeries() {
+    const topic = planTopic.trim() || '완벽 가이드';
+    setIsLoadingSeries(true);
+    setShowSeriesModal(true);
+    try {
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'split_series', topic }),
+      });
+      const data = await res.json();
+      if (data.series && data.series.part1) {
+        setSeriesParts(data.series);
+      } else {
+        setSeriesParts({
+          part1: `[1편] ${topic} - 처음 시작할 때 꼭 알아야 할 기초`,
+          part2: `[2편] ${topic} - 실패 없는 실전 활용법과 꿀팁`,
+          part3: `[3편] ${topic} - 자주 묻는 질문과 완벽 총정리`,
+        });
+      }
+    } catch {
+      setSeriesParts({
+        part1: `[1편] ${topic} - 처음 시작할 때 꼭 알아야 할 기초`,
+        part2: `[2편] ${topic} - 실패 없는 실전 활용법과 꿀팁`,
+        part3: `[3편] ${topic} - 자주 묻는 질문과 완벽 총정리`,
+      });
+    } finally {
+      setIsLoadingSeries(false);
+    }
+  }
+
+  // 4-E. 글 품질 점검 리포트 & 원클릭 자동 고치기
+  const qualityReport = (() => {
+    const forbiddenList = (brandForbiddenWords || '')
+      .split(',')
+      .map((w) => w.trim())
+      .filter(Boolean);
+
+    const longHeadlines = slides.filter((s) => (s.headline || '').length > 35);
+    const longBodies = slides.filter((s) => (s.body || '').length > 130);
+
+    const foundForbidden: { slideNum: number; word: string }[] = [];
+    slides.forEach((s) => {
+      forbiddenList.forEach((word) => {
+        if (s.headline.includes(word) || s.body.includes(word)) {
+          foundForbidden.push({ slideNum: s.slideNumber, word });
+        }
+      });
+    });
+
+    const captionLen = baseCaption.length;
+    const hashtagCount = countHashtags(baseCaption);
+
+    const isCaptionOver = captionLen > 2200;
+    const isHashtagsOver = hashtagCount > 30;
+
+    const totalIssues =
+      longHeadlines.length +
+      longBodies.length +
+      foundForbidden.length +
+      (isCaptionOver ? 1 : 0) +
+      (isHashtagsOver ? 1 : 0);
+
+    return {
+      longHeadlines,
+      longBodies,
+      foundForbidden,
+      isCaptionOver,
+      isHashtagsOver,
+      totalIssues,
+      captionLen,
+      hashtagCount,
+    };
+  })();
+
+  function handleAutoFixAllQualityIssues() {
+    const forbiddenList = (brandForbiddenWords || '')
+      .split(',')
+      .map((w) => w.trim())
+      .filter(Boolean);
+
+    // 1. 슬라이드 본문/제목 금지어 정제 및 긴 문장 말줄임 다듬기
+    const fixedSlides = slides.map((s) => {
+      let h = s.headline;
+      let b = s.body;
+      forbiddenList.forEach((fw) => {
+        h = h.replaceAll(fw, '');
+        b = b.replaceAll(fw, '');
+      });
+      if (h.length > 35) h = h.slice(0, 33) + '..';
+      if (b.length > 130) b = b.slice(0, 127) + '..';
+      return { ...s, headline: h.trim(), body: b.trim() };
+    });
+
+    // 2. 캡션에서 해시태그 30개 이내로 정제 및 2200자 초과 방지
+    let fixedCaption = baseCaption;
+    forbiddenList.forEach((fw) => {
+      fixedCaption = fixedCaption.replaceAll(fw, '');
+    });
+    const tags = fixedCaption.match(/#[^\s#]+/g) || [];
+    if (tags.length > 30) {
+      const keepTags = tags.slice(0, 30);
+      fixedCaption = fixedCaption.replace(/#[^\s#]+/g, '').trim() + '\n\n' + keepTags.join(' ');
+    }
+    if (fixedCaption.length > 2200) {
+      fixedCaption = fixedCaption.slice(0, 2190) + '..';
+    }
+
+    setSlides(fixedSlides);
+    setBaseCaption(fixedCaption);
+    setCanvasRebuildTick((t) => t + 1);
+    showToast('🛠️ 글자 수 초과, 금지어, 해시태그 한도를 한 번에 자동 교정했습니다!');
+  }
+
+  // 4-F. 올리기 좋은 시간 추천 리스트
+  const recommendedUploadTimes = [
+    {
+      label: '오늘 저녁 골든 타임 (직장인/학생 퇴근 시간)',
+      displayStr: '오늘 저녁 8시 30분',
+      timeValue: (() => {
+        const d = new Date();
+        d.setHours(20, 30, 0, 0);
+        return d.toISOString().slice(0, 16);
+      })(),
+      reason: '인스타그램 피드 체류 시간이 하루 중 가장 높은 시간대',
+    },
+    {
+      label: '내일 점심 골든 타임 (점심 식사 후 여유 시간)',
+      displayStr: '내일 낮 12시 15분',
+      timeValue: (() => {
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        d.setHours(12, 15, 0, 0);
+        return d.toISOString().slice(0, 16);
+      })(),
+      reason: '모바일 확인 빈도가 급증하며 저장률이 높은 시간대',
+    },
+    {
+      label: '내일 저녁 피크 타임 (퇴근/하교 직후)',
+      displayStr: '내일 저녁 6시 45분',
+      timeValue: (() => {
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        d.setHours(18, 45, 0, 0);
+        return d.toISOString().slice(0, 16);
+      })(),
+      reason: '대중교통 이동 중 피드 탐색이 가장 활발한 시간대',
+    },
+  ];
+
+  function handleApplyRecommendedTime(timeVal: string) {
+    setScheduleType('scheduled');
+    setScheduledDateTime(timeVal);
+    setShowBestTimesModal(false);
+    showToast(`⏰ 예약 시간이 "${timeVal}"로 자동 설정되었습니다!`);
+  }
+
+  // 4-G. 내 템플릿 저장 & 불러오기
+  async function handleSaveCurrentAsTemplate() {
+    const tplName = newTemplateNameInput.trim() || `내 템플릿 ${savedUserTemplates.length + 1}`;
+    const newTpl: UserSavedTemplate = {
+      id: `tpl-${Date.now()}`,
+      name: tplName,
+      slideCount: slides.length,
+      templateId,
+      accentColor,
+      fontId,
+      aspectRatio,
+      photoFitMode: slides[0]?.photoFitMode || 'contain',
+      photoBgFillMode: slides[0]?.photoBgFillMode || 'solid',
+      createdAt: new Date().toISOString(),
+    };
+    const nextList = [newTpl, ...savedUserTemplates];
+    setSavedUserTemplates(nextList);
+    await saveToLocalDb('acs_user_templates_v1', nextList);
+    setNewTemplateNameInput('');
+    showToast(`🎨 "${tplName}" 템플릿이 저장되었습니다! 다음번에 클릭 한 번으로 불러올 수 있어요.`);
+  }
+
+  function handleApplyUserTemplate(tpl: UserSavedTemplate) {
+    setTemplateId(tpl.templateId);
+    setAccentColor(tpl.accentColor);
+    setFontId(tpl.fontId);
+    setAspectRatio(tpl.aspectRatio);
+    handleSlideCountChange(tpl.slideCount);
+    setSlides((prev) =>
+      prev.map((s) => ({
+        ...s,
+        templateId: tpl.templateId,
+        photoFitMode: tpl.photoFitMode,
+        photoBgFillMode: tpl.photoBgFillMode,
+      }))
+    );
+    setCanvasRebuildTick((t) => t + 1);
+    setShowTemplateModal(false);
+    showToast(`🎨 "${tpl.name}" 스타일(디자인·색상·폰트·장수)을 그대로 적용했습니다!`);
+  }
+
+  async function handleDeleteUserTemplate(id: string) {
+    const nextList = savedUserTemplates.filter((t) => t.id !== id);
+    setSavedUserTemplates(nextList);
+    await saveToLocalDb('acs_user_templates_v1', nextList);
+    showToast('🗑️ 템플릿을 삭제했습니다.');
+  }
+
+  // ==========================================================================
   // 19) 전체 카드를 고해상도 PNG / JPEG로 렌더링 & ZIP 다운로드 (미리보기와 100% 동일!)
   // ==========================================================================
   const renderAllSlidesToDataUrls = useCallback(
@@ -3929,16 +5530,622 @@ export default function InstaAutoStudioPage() {
         {/* [탭 1] 카드뉴스 에디터 (탭을 이동해도 캔버스가 풀리지 않도록 hidden 처리) */}
         {/* ================================================================= */}
         <div className={activeTab === 'create' ? 'block' : 'hidden'}>
+          {/* =============================================================== */}
+          {/* [전체 흐름 7단계 안내 바]                                         */}
+          {/* 1) 주제 입력 → 2) AI 기획안 확인·승인 → 3) 사진 올리기 → 4) 자동 제작 */}
+          {/* → 5) 미리보기·수정 → 6) 캡션 → 7) 올리기/예약                     */}
+          {/* =============================================================== */}
+          <div className="mb-5 bg-white rounded-2xl border border-indigo-200 p-3.5 sm:p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-indigo-600 text-white">
+                  🚀 AI 기획부터 제작까지 전체 흐름
+                </span>
+                <span className="text-xs text-slate-600 font-semibold">
+                  기획안을 먼저 확인하고 <strong>[내가 OK 승인]</strong> 해야 제작으로 넘어가므로 AI 비용을 아끼고 엉뚱한 결과를 방지해요!
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-bold">
+                  🤖 오늘 AI 기획/생성: {dailyAiUsedCount} / {DAILY_AI_LIMIT_MAX}회
+                </span>
+                <button
+                  type="button"
+                  onClick={handleOpenSavedPlansModal}
+                  className="px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-extrabold border border-indigo-200"
+                >
+                  📂 저장된 기획안 불러오기 ({savedPlansList.length})
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-1.5">
+              {[
+                { step: 1, title: '1) 주제 입력', desc: '한 줄 주제 + 선택옵션' },
+                { step: 2, title: '2) AI 기획안 확인·승인', desc: '표지 후보 3개·컷별 수정' },
+                { step: 3, title: '3) 사진 올리기', desc: '내 사진 업로드' },
+                { step: 4, title: '4) 자동 제작', desc: '컷별 사진·글 배치' },
+                { step: 5, title: '5) 미리보기·수정', desc: '캔버스 자유 편집' },
+                { step: 6, title: '6) 캡션', desc: '본문·해시태그' },
+                { step: 7, title: '7) 올리기/예약', desc: '인스타 업로드·ZIP' },
+              ].map((item) => {
+                const isActive = workflowStep === item.step;
+                const isDone = workflowStep > item.step;
+                return (
+                  <button
+                    key={item.step}
+                    type="button"
+                    onClick={() => setWorkflowStep(item.step as 1 | 2 | 3 | 4 | 5 | 6 | 7)}
+                    className={`text-left p-2 rounded-xl border transition ${
+                      isActive
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                        : isDone
+                        ? 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <div className="text-[11px] font-extrabold truncate">
+                      {isDone ? '✅ ' : ''}
+                      {item.title}
+                    </div>
+                    <div
+                      className={`text-[10px] truncate ${
+                        isActive ? 'text-indigo-100' : 'text-slate-500'
+                      }`}
+                    >
+                      {item.desc}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* ============================================================= */}
-            {/* 왼쪽 패널 (5칸): AI 생성 + [장별 직접 작성] + 디자인/사진/폰트/발행 */}
+            {/* 왼쪽 패널 (5칸): [1단계: 주제→AI 기획안 확인·승인] + [장별 직접 작성] + 디자인/사진/폰트/발행 */}
             {/* ============================================================= */}
             <div className="lg:col-span-5 space-y-5 order-2 lg:order-1">
-              {/* 1. AI 초안 생성 & 전체 사진 보관함 */}
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
+              {/* ============================================================= */}
+              {/* [1단계 핵심 패널 1] 1) 주제 입력 → AI 컷별 기획안 만들기         */}
+              {/* ============================================================= */}
+              <div className="bg-white rounded-2xl border-2 border-indigo-600 p-4 sm:p-5 shadow-md space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="inline-block text-[11px] font-extrabold px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 mb-1">
+                      STEP 1 · 주제 → 컷별 AI 기획
+                    </span>
+                    <h2 className="text-base font-extrabold text-slate-900">
+                      1. 주제 입력 & AI 기획안 만들기
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleOpenSavedPlansModal}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-extrabold border border-slate-300"
+                  >
+                    📂 저장된 기획안 ({savedPlansList.length})
+                  </button>
+                </div>
+
+                {/* 필수 입력: 주제 (한 줄이면 충분) */}
+                <div>
+                  <label className="block text-xs font-extrabold text-slate-800 mb-1">
+                    🎯 카드뉴스 주제 <span className="text-rose-600">(필수 · 한 줄이면 충분해요!)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={planTopic}
+                    onChange={(e) => setPlanTopic(e.target.value)}
+                    placeholder="예: 만년필 입문자가 첫 만년필 고를 때 실패하지 않는 3가지 기준"
+                    className="w-full px-3.5 py-2.5 rounded-xl border-2 border-indigo-200 text-xs sm:text-sm font-bold focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* 선택 입력 열기/접기 토글 (비워도 잘 작동함 안내) */}
+                <div className="border border-slate-200 rounded-xl bg-slate-50/70 p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-extrabold text-slate-700">
+                      ✨ 선택 입력 (비워도 AI가 알아서 잘 작동해요!)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowOptionalPlanInputs(!showOptionalPlanInputs)}
+                      className="text-[11px] font-bold text-indigo-600 underline"
+                    >
+                      {showOptionalPlanInputs ? '선택 입력 접기 ▲' : '선택 입력 펼치기 ▼'}
+                    </button>
+                  </div>
+
+                  {showOptionalPlanInputs && (
+                    <div className="space-y-3 pt-1 border-t border-slate-200/80">
+                      {/* 누구에게 보여줄지 (대상) */}
+                      <div>
+                        <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                          👥 누구에게 보여줄지 (대상 · 선택)
+                        </label>
+                        <input
+                          type="text"
+                          value={planTargetAudience}
+                          onChange={(e) => setPlanTargetAudience(e.target.value)}
+                          placeholder="예: 만년필을 처음 사보는 2030 직장인, 손글씨 다이어리 입문자 (비워도 됨)"
+                          className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs bg-white"
+                        />
+                      </div>
+
+                      {/* 목적 & 말투 & 장수 */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                            📌 목적 (선택)
+                          </label>
+                          <select
+                            value={planPurpose}
+                            onChange={(e) => setPlanPurpose(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white"
+                          >
+                            <option value="">AI 자동 판단</option>
+                            <option value="정보 전달">정보 전달</option>
+                            <option value="공감">공감</option>
+                            <option value="홍보">홍보</option>
+                            <option value="후기">후기</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                            💬 말투 (선택)
+                          </label>
+                          <select
+                            value={planTone}
+                            onChange={(e) => setPlanTone(e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white"
+                          >
+                            <option value="">AI 자동 추천</option>
+                            <option value="친근하게">친근하게 (~해요)</option>
+                            <option value="전문적으로">전문적으로 (신뢰감)</option>
+                            <option value="짧고 굵게">짧고 굵게 (임팩트)</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                            📑 장수 (기본: AI 추천)
+                          </label>
+                          <select
+                            value={String(planSlideCountOption)}
+                            onChange={(e) =>
+                              setPlanSlideCountOption(
+                                e.target.value === 'auto' ? 'auto' : Number(e.target.value)
+                              )
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white"
+                          >
+                            <option value="auto">🤖 AI가 추천 (기본)</option>
+                            {Array.from({ length: maxSlideLimit }).map((_, i) => (
+                              <option key={i + 1} value={String(i + 1)}>
+                                {i + 1}장 직접 지정
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* 참고 자료 (글 붙여넣기 또는 링크) */}
+                      <div>
+                        <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                          📎 참고 자료 (글 붙여넣기 또는 링크 · 선택)
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={planReferenceText}
+                          onChange={(e) => setPlanReferenceText(e.target.value)}
+                          placeholder="참고할 블로그 글, 제품 설명, 메모, 또는 링크를 붙여넣으세요 (비워도 됨)"
+                          className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs bg-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 기획안 생성 & 같은 주제로 다른 기획안 비교 추가 버튼 */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateAIPlan('new')}
+                    disabled={isGeneratingPlan}
+                    className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-extrabold text-xs sm:text-sm shadow-sm transition disabled:opacity-50"
+                  >
+                    {isGeneratingPlan
+                      ? '🤖 AI가 컷별 기획안 만드는 중...'
+                      : planCandidates.length > 0
+                      ? '🔄 현재 기획안 전체 다시 기획하기'
+                      : '✨ 1단계: AI 기획안 만들기'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateAIPlan('compare')}
+                    disabled={isGeneratingPlan || planCandidates.length >= 3}
+                    className="py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-800 font-extrabold text-xs sm:text-sm border border-indigo-200 transition disabled:opacity-40"
+                  >
+                    ➕ 다른 기획안 추가 비교 ({planCandidates.length}/3개)
+                  </button>
+                </div>
+
+                {/* 4단계 추천 기능 툴바 (주제 추천, 시리즈, 브랜드, 품질 점검, 추천 시간, 내 템플릿) */}
+                <div className="pt-2 border-t border-slate-200/80">
+                  <span className="text-[11px] font-extrabold text-slate-500 block mb-1.5">
+                    ⚡ 4단계 스마트 추천 기능 모음 (클릭하면 바로 열려요!)
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowIdeasModal(true);
+                        if (recommendedIdeas.length === 0) handleFetchTopicIdeas();
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      💡 주제 아이디어 10개
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSplitSeries}
+                      className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      📚 1·2·3편 시리즈 나누기
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowBrandModal(true)}
+                      className="px-2.5 py-1.5 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      🏷️ 브랜드 설정
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowQualityModal(true)}
+                      className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      🔍 글 품질·사실 점검
+                      {qualityReport.totalIssues > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[10px]">
+                          {qualityReport.totalIssues}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowBestTimesModal(true)}
+                      className="px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      ⏰ 추천 업로드 시간
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowTemplateModal(true)}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 text-xs font-extrabold flex items-center gap-1"
+                    >
+                      🎨 내 템플릿 ({savedUserTemplates.length})
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* ============================================================= */}
+              {/* [1단계 핵심 패널 2] 2) AI 기획안 확인 · 비교 · 컷별 직접 수정 · 승인(OK) */}
+              {/* ============================================================= */}
+              {activePlan && (
+                <div className="bg-white rounded-2xl border-2 border-emerald-500 p-4 sm:p-5 shadow-md space-y-4">
+                  {/* 상단 헤더 & 기획안 비교 탭 (최대 3개) */}
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <span className="inline-block text-[11px] font-extrabold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 mb-1">
+                          STEP 2 · AI 기획안 확인 · 수정 · 승인
+                        </span>
+                        <h2 className="text-base font-extrabold text-slate-900">
+                          📋 AI 컷별 기획안 ({activePlan.cuts.length}장 구성)
+                        </h2>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleSaveCurrentPlan}
+                          disabled={isSavingPlan}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-extrabold border border-slate-300"
+                        >
+                          💾 기획안 저장
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateAIPlan('new')}
+                          disabled={isGeneratingPlan}
+                          className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-extrabold border border-rose-200"
+                        >
+                          🔄 전체 다시 기획하기
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 같은 주제로 여러 기획안 비교 탭 (기획안 1 / 기획안 2 / 기획안 3) */}
+                    <div className="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl overflow-x-auto">
+                      {planCandidates.map((cand, idx) => (
+                        <button
+                          key={cand.id}
+                          type="button"
+                          onClick={() => setActivePlanTabIdx(idx)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-extrabold flex-shrink-0 transition ${
+                            activePlanTabIdx === idx
+                              ? 'bg-indigo-600 text-white shadow-sm'
+                              : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
+                          }`}
+                        >
+                          {cand.label || `기획안 ${idx + 1}`} ({cand.cuts.length}장)
+                          {cand.isApproved ? ' ✅승인됨' : ''}
+                        </button>
+                      ))}
+                      {planCandidates.length < 3 && (
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateAIPlan('compare')}
+                          disabled={isGeneratingPlan}
+                          className="px-2.5 py-1.5 rounded-lg text-xs font-extrabold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 flex-shrink-0"
+                        >
+                          + 비교 기획안 추가 ({planCandidates.length}/3)
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* AI 추천 장수와 이유 */}
+                  <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 text-xs space-y-1">
+                    <div className="font-extrabold text-indigo-950 flex items-center justify-between">
+                      <span>💡 AI 추천 장수: {activePlan.recommendedSlideCount}장 (현재 {activePlan.cuts.length}장)</span>
+                      <span className="text-[11px] text-indigo-700">마지막 장: 행동 유도(저장·공유·댓글)</span>
+                    </div>
+                    <p className="text-indigo-900 leading-relaxed">{activePlan.recommendationReason}</p>
+                  </div>
+
+                  {/* 표지 제목 후보 3개 (눈길을 끄는 순서로, 내가 하나 고른다) */}
+                  <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-extrabold text-amber-950">
+                        🏆 표지 제목 후보 3개 (눈길을 끄는 순서 · 하나를 골라주세요!)
+                      </span>
+                      <span className="text-[11px] font-bold text-amber-700">
+                        선택하면 1컷 제목에 바로 반영돼요
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {activePlan.coverTitleCandidates.map((candTitle, cIdx) => {
+                        const isSelected = activePlan.selectedCoverCandidateIndex === cIdx;
+                        return (
+                          <div
+                            key={cIdx}
+                            onClick={() => handleSelectCoverCandidate(cIdx)}
+                            className={`flex items-center gap-2 p-2 rounded-xl border cursor-pointer transition ${
+                              isSelected
+                                ? 'bg-white border-amber-500 ring-2 ring-amber-400/50 shadow-sm'
+                                : 'bg-white/70 border-amber-200 hover:bg-white'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="cover-title-candidate"
+                              checked={isSelected}
+                              onChange={() => handleSelectCoverCandidate(cIdx)}
+                              className="accent-amber-600"
+                            />
+                            <span className="text-[11px] font-extrabold px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 flex-shrink-0">
+                              후보 {cIdx + 1}
+                            </span>
+                            <input
+                              type="text"
+                              value={candTitle}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => handleEditCoverCandidateText(cIdx, e.target.value)}
+                              className="flex-1 text-xs font-bold text-slate-900 bg-transparent border-b border-transparent focus:border-amber-400 focus:outline-none"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 컷별 구성 카드 목록 (모든 글을 내가 직접 고칠 수 있음 + 추가/삭제/순서 바꾸기/이 컷만 다시 쓰기) */}
+                  <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+                    {activePlan.cuts.map((cut, cutIdx) => {
+                      const headlineLen = (cut.headline || '').length;
+                      const isCutHeadlineLong = headlineLen > 22;
+                      return (
+                        <div
+                          key={cut.id}
+                          className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5 shadow-sm"
+                        >
+                          {/* 컷 상단 바: 장 번호 / 역할 선택 / 순서 이동 / 이 컷만 다시 쓰기 / 삭제 */}
+                          <div className="flex flex-wrap items-center justify-between gap-1.5 pb-2 border-b border-slate-200">
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded-lg bg-indigo-600 text-white text-xs font-extrabold">
+                                {cut.slideNumber}컷
+                              </span>
+                              <select
+                                value={cut.roleType}
+                                onChange={(e) =>
+                                  handleUpdatePlanCutField(
+                                    cutIdx,
+                                    'roleType',
+                                    e.target.value as PlanCutRoleLabel
+                                  )
+                                }
+                                className="px-2 py-1 rounded-lg border border-slate-300 text-xs font-extrabold bg-white text-slate-800"
+                              >
+                                {PLAN_CUT_ROLE_OPTIONS.map((roleOpt) => (
+                                  <option key={roleOpt} value={roleOpt}>
+                                    역할: {roleOpt}
+                                  </option>
+                                ))}
+                              </select>
+                              {cut.isManuallyEdited && (
+                                <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                                  ✏️ 직접 수정됨
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleMovePlanCutOrder(cutIdx, 'up')}
+                                disabled={cutIdx === 0}
+                                className="px-1.5 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100 disabled:opacity-40"
+                                title="앞 컷으로 이동"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMovePlanCutOrder(cutIdx, 'down')}
+                                disabled={cutIdx >= activePlan.cuts.length - 1}
+                                className="px-1.5 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100 disabled:opacity-40"
+                                title="뒷 컷으로 이동"
+                              >
+                                ▼
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRegenerateSinglePlanCut(cutIdx)}
+                                disabled={regeneratingCutIdx === cutIdx}
+                                className="px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-extrabold"
+                              >
+                                {regeneratingCutIdx === cutIdx
+                                  ? '작성 중...'
+                                  : '🔄 이 컷만 다시 쓰기'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteCutFromPlan(cutIdx)}
+                                disabled={activePlan.cuts.length <= 1}
+                                className="px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-[11px] font-bold disabled:opacity-40"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* 컷 제목 (15자 안팎 권장) */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-[11px] font-extrabold text-slate-700">
+                                📌 제목 (15자 안팎 권장)
+                              </label>
+                              <span
+                                className={`text-[10px] font-bold ${
+                                  isCutHeadlineLong ? 'text-amber-600' : 'text-slate-400'
+                                }`}
+                              >
+                                {headlineLen}자
+                              </span>
+                            </div>
+                            <input
+                              type="text"
+                              value={cut.headline}
+                              onChange={(e) =>
+                                handleUpdatePlanCutField(cutIdx, 'headline', e.target.value)
+                              }
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white"
+                            />
+                          </div>
+
+                          {/* 짧은 본문 (2~3줄) */}
+                          <div>
+                            <label className="block text-[11px] font-extrabold text-slate-700 mb-1">
+                              📝 짧은 본문 (2~3줄 권장)
+                            </label>
+                            <textarea
+                              rows={2}
+                              value={cut.body}
+                              onChange={(e) =>
+                                handleUpdatePlanCutField(cutIdx, 'body', e.target.value)
+                              }
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs bg-white"
+                            />
+                          </div>
+
+                          {/* 사진에 들어갈 글 & 이 컷에 어울리는 사진 가이드 */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[11px] font-extrabold text-indigo-800 mb-1">
+                                🖼️ 사진에 들어갈 글 (사진 위 1~2줄)
+                              </label>
+                              <input
+                                type="text"
+                                value={cut.photoOverlayText}
+                                onChange={(e) =>
+                                  handleUpdatePlanCutField(
+                                    cutIdx,
+                                    'photoOverlayText',
+                                    e.target.value
+                                  )
+                                }
+                                placeholder="예: 첫 만년필 선택 핵심 기준!"
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-indigo-200 text-xs bg-white font-semibold"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-extrabold text-emerald-800 mb-1">
+                                📷 이 컷에 어울리는 사진 가이드
+                              </label>
+                              <input
+                                type="text"
+                                value={cut.photoGuide}
+                                onChange={(e) =>
+                                  handleUpdatePlanCutField(cutIdx, 'photoGuide', e.target.value)
+                                }
+                                placeholder="예: 제품을 손에 든 사진, 밝은 풍경 사진"
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs bg-white"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 장 추가 버튼 (최대 MAX_SLIDES) */}
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={handleAddCutToPlan}
+                      disabled={activePlan.cuts.length >= maxSlideLimit}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-extrabold border border-slate-300 disabled:opacity-40"
+                    >
+                      ➕ 기획안에 컷 추가 ({activePlan.cuts.length}/{maxSlideLimit}장)
+                    </button>
+                    <span className="text-[11px] text-slate-500 font-semibold">
+                      모든 글을 자유롭게 고친 뒤 아래 승인(OK) 버튼을 눌러주세요!
+                    </span>
+                  </div>
+
+                  {/* 기획안 승인(OK) 버튼 → 눌러야 제작/미리보기 슬라이드로 반영! */}
+                  <button
+                    type="button"
+                    onClick={handleApprovePlanAndApplyToSlides}
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-extrabold text-sm shadow-md transition flex items-center justify-center gap-2"
+                  >
+                    <span>
+                      ✅ 이 기획안 승인(OK) → 카드뉴스 {activePlan.cuts.length}장 제작에 바로 반영하기
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {/* 기존 빠른 초안 생성 & 전체 직접 쓰기 보조 패널 (그대로 유지) */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-3">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-base font-extrabold text-slate-900">
-                    1. AI로 채우기 또는 직접 쓰기 선택
+                  <h2 className="text-sm font-extrabold text-slate-800">
+                    ⚡ 빠른 메모로 바로 채우기 / 전체 빈칸으로 시작
                   </h2>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs font-bold text-slate-500">전체 장수:</span>
@@ -3955,11 +6162,11 @@ export default function InstaAutoStudioPage() {
                 </div>
 
                 <textarea
-                  rows={3}
+                  rows={2}
                   value={rawText}
                   onChange={(e) => setRawText(e.target.value)}
-                  placeholder="AI로 초안을 채우고 싶다면 여기에 주제나 메모를 적어주세요. (직접 쓰실 분은 아래 2번 칸에서 바로 장별로 작성하실 수 있어요!)"
-                  className="w-full rounded-xl border border-slate-300 p-3 text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  placeholder="긴 메모를 붙여넣어 바로 슬라이드를 채우거나, 오른쪽 버튼으로 빈칸에서 직접 쓸 수도 있어요."
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 />
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -3967,16 +6174,16 @@ export default function InstaAutoStudioPage() {
                     type="button"
                     onClick={handleGenerateWithAI}
                     disabled={isGeneratingAI}
-                    className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm shadow-sm transition disabled:opacity-50"
+                    className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-extrabold text-xs shadow-sm transition disabled:opacity-50"
                   >
                     {isGeneratingAI
                       ? '🤖 AI가 작성 중...'
-                      : `✨ AI로 전체 채우기 (${slides.length}장)`}
+                      : `✨ 메모로 바로 채우기 (${slides.length}장)`}
                   </button>
                   <button
                     type="button"
                     onClick={() => handleClearSlideForDirectWriting('all')}
-                    className="py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold text-xs sm:text-sm border border-slate-300 transition"
+                    className="py-2 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold text-xs border border-slate-300 transition"
                   >
                     ✏️ 빈칸에서 내가 직접 쓰기
                   </button>
@@ -3990,10 +6197,10 @@ export default function InstaAutoStudioPage() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <span className="inline-block text-[11px] font-extrabold px-2 py-0.5 rounded bg-blue-100 text-blue-800 mb-1">
-                      핵심 기능 1 · 2
+                      장별 직접 수정 · 사진 비율 유지
                     </span>
                     <h2 className="text-base font-extrabold text-slate-900">
-                      2. 페이지(장)별 내용 직접 쓰기 & 사진 설정
+                      3. 페이지(장)별 내용 직접 쓰기 & 사진 설정
                     </h2>
                   </div>
                   <div className="flex items-center gap-1">
@@ -4092,9 +6299,18 @@ export default function InstaAutoStudioPage() {
                   </div>
                 </div>
 
-                {/* 현재 장의 상단 뱃지 / 제목 / 본문 직접 입력칸 (고치면 미리보기 즉시 변경!) */}
+                {/* 현재 장의 상단 뱃지 / 제목 / 본문 / 사진에 들어갈 글 직접 입력칸 */}
                 {activeSlide && (
                   <div className="space-y-3">
+                    {/* AI 기획안의 사진 가이드가 있으면 안내 표시 */}
+                    {activeSlide.photoGuide && (
+                      <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between gap-2">
+                        <span>
+                          📷 <strong>이 컷에 어울리는 사진 가이드:</strong> {activeSlide.photoGuide}
+                        </span>
+                      </div>
+                    )}
+
                     {/* 상단 뱃지 문구 */}
                     <div>
                       <label className="block text-xs font-extrabold text-slate-700 mb-1">
@@ -4173,15 +6389,46 @@ export default function InstaAutoStudioPage() {
                       )}
                     </div>
 
+                    {/* 사진에 들어갈 글 (반투명 어두운 막 위에 올라가는 1~2줄 문구) */}
+                    <div>
+                      <label className="block text-xs font-extrabold text-indigo-800 mb-1">
+                        🖼️ {activeSlideIndex + 1}장 사진에 들어갈 글 (반투명 어두운 막 위에 잘 읽히게 표시)
+                      </label>
+                      <input
+                        type="text"
+                        value={activeSlide.photoOverlayText || ''}
+                        onChange={(e) =>
+                          handleDirectSlideTextChange('photoOverlayText', e.target.value)
+                        }
+                        placeholder="비워두면 표시되지 않으며, 입력하면 사진 위 반투명 막에 굵은 흰 글씨로 들어갑니다."
+                        className="w-full px-3 py-1.5 rounded-xl border border-indigo-200 text-xs font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
                     {/* ========================================================= */}
-                    {/* [기능 1 & 2 통합] 이 장의 사진 넣기/바꾸기/지우기 & 비율/블러 설정 */}
+                    {/* [2단계 핵심] 이 장의 사진 넣기/바꾸기/지우기 & 가이드 매칭/남은 사진 */}
                     {/* ========================================================= */}
                     <div className="p-3.5 rounded-xl bg-blue-50/60 border border-blue-200 space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-xs font-extrabold text-blue-950">
-                          🖼️ {activeSlideIndex + 1}장 전용 사진 관리 ({activePhotoUrls.length}장)
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-extrabold text-blue-950">
+                            🖼️ {activeSlideIndex + 1}장 전용 사진 관리 ({activePhotoUrls.length}장)
+                          </span>
+                          {activePhotoUrls.length === 0 && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[10px] font-extrabold">
+                              ⚠️ 사진 필요 (현재 글 전용)
+                            </span>
+                          )}
+                        </div>
                         <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleAutoMatchPhotosToCuts}
+                            disabled={isMatchingPhotos || uploadedPhotos.length === 0}
+                            className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-extrabold disabled:opacity-40"
+                          >
+                            {isMatchingPhotos ? '배정 중...' : '🤖 사진 가이드 자동 배정'}
+                          </button>
                           <label className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold cursor-pointer shadow-sm">
                             📷 {activePhotoUrls.length > 0 ? '이 장 사진 바꾸기' : '이 장에 사진 넣기'}
                             <input
@@ -4189,12 +6436,12 @@ export default function InstaAutoStudioPage() {
                               accept="image/*"
                               multiple
                               onChange={(e) =>
-                                handleSlideSpecificPhotoUpload(e.target.files, 'set-slide-photo')
+                                handleSlideSpecificPhotoUpload(e.target.value ? e.target.files : null, 'set-slide-photo')
                               }
                               className="hidden"
                             />
                           </label>
-                          {activePhotoUrls.length > 0 && (
+                          {activePhotoUrls.length > 0 ? (
                             <>
                               <label className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-blue-50 text-blue-700 border border-blue-300 text-xs font-bold cursor-pointer">
                                 + 사진 추가
@@ -4204,7 +6451,7 @@ export default function InstaAutoStudioPage() {
                                   multiple
                                   onChange={(e) =>
                                     handleSlideSpecificPhotoUpload(
-                                      e.target.files,
+                                      e.target.value ? e.target.files : null,
                                       'add-more-to-slide'
                                     )
                                   }
@@ -4219,9 +6466,44 @@ export default function InstaAutoStudioPage() {
                                 🗑️ 사진 지우기
                               </button>
                             </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleMakeSlideTextOnly(activeSlideIndex)}
+                              className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-300"
+                            >
+                              📝 글 전용 디자인 유지
+                            </button>
                           )}
                         </div>
                       </div>
+
+                      {/* 남은 사진 목록 (컷에 사용되지 않은 사진이 있으면 표시) */}
+                      {remainingPhotos.length > 0 && (
+                        <div className="p-2.5 rounded-xl bg-white border border-blue-200 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-extrabold text-blue-900">
+                              📦 남은 사진 보관함 ({remainingPhotos.length}장) - 사진을 누르면 {activeSlideIndex + 1}장에 바로 들어가요!
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 overflow-x-auto py-1">
+                            {remainingPhotos.map((rp, rpIdx) => (
+                              <button
+                                key={`${rp.url.slice(-15)}-${rpIdx}`}
+                                type="button"
+                                onClick={() => handleAssignRemainingPhotoToSlide(activeSlideIndex, rp.url)}
+                                className="relative w-12 h-12 rounded-lg overflow-hidden border border-slate-300 hover:border-blue-600 hover:scale-105 transition flex-shrink-0 group"
+                                title="클릭하면 현재 장에 이 사진을 넣습니다"
+                              >
+                                <img src={rp.url} alt="" className="w-full h-full object-cover" />
+                                <span className="absolute inset-0 bg-blue-600/30 opacity-0 group-hover:opacity-100 text-white font-extrabold text-[10px] flex items-center justify-center">
+                                  넣기
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* 현재 장에 들어간 사진 썸네일 미리보기 */}
                       {activePhotoUrls.length > 0 && (
@@ -4658,7 +6940,14 @@ export default function InstaAutoStudioPage() {
                   <h2 className="text-base font-extrabold text-slate-900">
                     5. 인스타 캡션 & 자동 업로드
                   </h2>
-                  <div className="flex gap-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleGenerateSmartCaptionWithAI}
+                      className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11px] font-extrabold shadow-sm hover:from-blue-700 hover:to-indigo-700"
+                    >
+                      ✨ 캡션·해시태그 AI 자동 생성
+                    </button>
                     {CAPTION_TONES.map((t) => (
                       <button
                         key={t.id}
@@ -4676,8 +6965,20 @@ export default function InstaAutoStudioPage() {
                   </div>
                 </div>
 
+                {/* 사실 확인(Fact Check) 배지 안내 */}
+                {factCheckAlerts.length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-extrabold">🔍 사실 확인 필요:</span>
+                      <span className="text-[11px]">
+                        본문에 숫자/통계/가격({factCheckAlerts.map((f) => f.phrase).slice(0, 3).join(', ')})가 포함되어 있습니다. 업로드 전 사실 여부를 한 번 더 확인해 주세요!
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <textarea
-                  rows={3}
+                  rows={4}
                   value={currentEditingCaption}
                   onChange={(e) => {
                     const val = e.target.value;
@@ -4688,15 +6989,20 @@ export default function InstaAutoStudioPage() {
                         [activeCaptionTab]: val,
                       }));
                   }}
-                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs sm:text-sm"
+                  className={`w-full rounded-xl border p-2.5 text-xs sm:text-sm font-medium ${
+                    qualityReport.isCaptionOver ? 'border-rose-400 bg-rose-50/30' : 'border-slate-300'
+                  }`}
+                  placeholder="첫 줄 시선 집중 문구와 본문, 해시태그를 입력하거나 상단 [✨ 캡션 AI 자동 생성]을 눌러보세요!"
                 />
 
                 <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500">
-                  <span>
+                  <span className={qualityReport.isCaptionOver ? 'text-rose-600 font-extrabold' : ''}>
                     글자 수: {captionLength.toLocaleString()} / {CAPTION_LIMITS.MAX_LENGTH}자
+                    {qualityReport.isCaptionOver && ' ⚠️ 2,200자 초과!'}
                   </span>
-                  <span>
+                  <span className={qualityReport.isHashtagsOver ? 'text-rose-600 font-extrabold' : ''}>
                     해시태그: {hashtagCount} / {CAPTION_LIMITS.MAX_HASHTAGS}개
+                    {qualityReport.isHashtagsOver && ' ⚠️ 30개 초과!'}
                   </span>
                 </div>
 
@@ -5749,6 +8055,539 @@ export default function InstaAutoStudioPage() {
           </section>
         )}
       </main>
+
+      {/* [1단계] 저장된 기획안 불러오기 모달 */}
+      {showSavedPlansModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl space-y-4 max-h-[82vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  📂 저장된 기획안 불러오기
+                </h3>
+                <p className="text-xs text-slate-500">
+                  이전에 저장해 둔 기획안을 불러와서 이어서 수정하거나 카드뉴스로 만들 수 있어요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSavedPlansModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+              {savedPlansList.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500 bg-slate-50 rounded-2xl border border-slate-200">
+                  아직 저장된 기획안이 없어요. AI 기획안을 만든 뒤 <strong>[💾 기획안 저장]</strong> 버튼을 눌러보세요!
+                </div>
+              ) : (
+                savedPlansList.map((sp) => (
+                  <div
+                    key={sp.id}
+                    className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-indigo-50/40 transition flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px] font-extrabold">
+                          {sp.cuts?.length || 0}장 구성
+                        </span>
+                        {sp.isApproved && (
+                          <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-extrabold">
+                            ✅ 승인됨
+                          </span>
+                        )}
+                        <span className="text-[10px] text-slate-400">
+                          {sp.updatedAt ? new Date(sp.updatedAt).toLocaleString('ko-KR') : ''}
+                        </span>
+                      </div>
+                      <div className="text-xs sm:text-sm font-extrabold text-slate-900 truncate">
+                        {sp.topic}
+                      </div>
+                      <div className="text-[11px] text-slate-600 truncate">
+                        표지: {sp.coverTitleCandidates?.[sp.selectedCoverCandidateIndex || 0] || sp.cuts?.[0]?.headline || ''}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleLoadPlanFromSaved(sp)}
+                        className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold shadow-sm"
+                      >
+                        불러오기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSavedPlan(sp.id)}
+                        className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4-A. 브랜드 설정 모달 */}
+      {showBrandModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  🏷️ 계정별 브랜드 설정 (A)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  말투, 해시태그, 금지어, 마지막 문구를 저장해 두면 기획할 때마다 자동으로 반영돼요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBrandModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-extrabold text-slate-700 mb-1">
+                  💬 기본 말투
+                </label>
+                <select
+                  value={brandTone}
+                  onChange={(e) => setBrandTone(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-bold bg-white"
+                >
+                  <option value="친근하게">친근하게 (~해요, 다정한 어조)</option>
+                  <option value="전문적으로">전문적으로 (신뢰감, 격식 있는 어조)</option>
+                  <option value="짧고 굵게">짧고 굵게 (임팩트, 직관적인 어조)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-extrabold text-slate-700 mb-1">
+                  🏷️ 자주 쓰는 해시태그
+                </label>
+                <textarea
+                  rows={2}
+                  value={brandFavoriteHashtags}
+                  onChange={(e) => setBrandFavoriteHashtags(e.target.value)}
+                  placeholder="#만년필 #손글씨 #문구스타그램 #다이어리"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300"
+                />
+              </div>
+
+              <div>
+                <label className="block font-extrabold text-rose-700 mb-1">
+                  🚫 쓰지 말아야 할 단어 (금지어, 쉼표로 구분)
+                </label>
+                <input
+                  type="text"
+                  value={brandForbiddenWords}
+                  onChange={(e) => setBrandForbiddenWords(e.target.value)}
+                  placeholder="예: 무조건, 100%, 완벽, 최고, 기적"
+                  className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50/30"
+                />
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  기획안이나 슬라이드에 이 단어가 들어가면 품질 점검에서 경고해 드려요.
+                </p>
+              </div>
+
+              <div>
+                <label className="block font-extrabold text-slate-700 mb-1">
+                  📌 마지막 고정 문구 (캡션 하단)
+                </label>
+                <textarea
+                  rows={2}
+                  value={brandClosingSignature}
+                  onChange={(e) => setBrandClosingSignature(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBrandModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-300 font-bold text-slate-700 text-xs"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveBrandSettings}
+                className="flex-1 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-extrabold text-xs shadow-md"
+              >
+                저장하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4-C. 주제 아이디어 10개 추천 모달 */}
+      {showIdeasModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[82vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  💡 요즘 반응 좋은 주제 10개 추천 (C)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  원하는 주제를 클릭하면 1단계 입력창에 바로 입력돼요!
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowIdeasModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={ideaKeyword}
+                onChange={(e) => setIdeaKeyword(e.target.value)}
+                placeholder="키워드 (예: 만년필 입문, 성수동 카페, 직장인 재테크)"
+                className="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold"
+              />
+              <button
+                type="button"
+                onClick={handleFetchTopicIdeas}
+                disabled={isLoadingIdeas}
+                className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold disabled:opacity-50"
+              >
+                {isLoadingIdeas ? '추천받는 중...' : '다시 추천받기'}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {recommendedIdeas.map((idea, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => handleSelectRecommendedIdea(idea)}
+                  className="w-full text-left p-3 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-amber-50 hover:border-amber-300 transition flex items-center justify-between gap-2 group"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold flex items-center justify-center flex-shrink-0">
+                      {idx + 1}
+                    </span>
+                    <span className="text-xs font-bold text-slate-900 group-hover:text-amber-950">
+                      {idea}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-extrabold text-amber-700 opacity-0 group-hover:opacity-100 flex-shrink-0">
+                    선택 👉
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4-D. 1편·2편·3편 시리즈 나누기 모달 */}
+      {showSeriesModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  📚 1편 · 2편 · 3편 시리즈 기획 (D)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  긴 내용을 독자가 끝까지 팔로우하며 볼 수 있도록 3편으로 나누었어요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSeriesModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            {isLoadingSeries ? (
+              <div className="p-8 text-center text-xs text-slate-600 font-bold animate-pulse">
+                🤖 AI가 1편·2편·3편 시리즈 구성을 나누는 중입니다...
+              </div>
+            ) : seriesParts ? (
+              <div className="space-y-2.5">
+                {[
+                  { tag: '1편 (입문·기초)', title: seriesParts.part1, color: 'bg-blue-50 border-blue-200 text-blue-900' },
+                  { tag: '2편 (실전 핵심)', title: seriesParts.part2, color: 'bg-indigo-50 border-indigo-200 text-indigo-900' },
+                  { tag: '3편 (심화 총정리)', title: seriesParts.part3, color: 'bg-purple-50 border-purple-200 text-purple-900' },
+                ].map((part, pIdx) => (
+                  <div
+                    key={pIdx}
+                    className={`p-3.5 rounded-2xl border ${part.color} flex items-center justify-between gap-2`}
+                  >
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-white/80 block w-fit mb-1">
+                        {part.tag}
+                      </span>
+                      <p className="text-xs font-extrabold truncate">{part.title}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlanTopic(part.title);
+                        setShowSeriesModal(false);
+                        showToast(`📚 "${part.title}" 주제로 설정되었습니다! 바로 기획안을 만들어보세요.`);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-extrabold flex-shrink-0 hover:bg-slate-800"
+                    >
+                      이 편으로 기획
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* 4-E. 글 품질 점검 & 원클릭 자동 고치기 모달 */}
+      {showQualityModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  🔍 글 품질 & 사실 점검 (B, E)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  업로드 전 글자 수, 금지어, 사실 확인 필요 항목을 점검해요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowQualityModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            <div className="space-y-2.5 max-h-[60vh] overflow-y-auto pr-1 text-xs">
+              {/* 점검 결과 요약 */}
+              <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                <span className="font-bold text-slate-700">발견된 점검 항목:</span>
+                <span className="font-extrabold text-sm text-indigo-600">
+                  {qualityReport.totalIssues + factCheckAlerts.length}건
+                </span>
+              </div>
+
+              {/* 금지어 발견 */}
+              {qualityReport.foundForbidden.length > 0 && (
+                <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 space-y-1">
+                  <span className="font-extrabold block">🚫 브랜드 금지어 발견 ({qualityReport.foundForbidden.length}건)</span>
+                  <div className="text-[11px] space-y-0.5">
+                    {qualityReport.foundForbidden.map((f, i) => (
+                      <p key={i}>• {f.slideNum}장에 금지어 "{f.word}"가 포함되어 있어요.</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 글자 수 초과 슬라이드 */}
+              {qualityReport.longHeadlines.length > 0 && (
+                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 space-y-1">
+                  <span className="font-extrabold block">⚠️ 제목이 너무 긴 컷 ({qualityReport.longHeadlines.length}건)</span>
+                  <p className="text-[11px]">
+                    {qualityReport.longHeadlines.map((s) => `${s.slideNumber}장`).join(', ')} 제목이 35자를 초과합니다.
+                  </p>
+                </div>
+              )}
+
+              {/* 사실 확인(Fact Check) 알림 */}
+              {factCheckAlerts.length > 0 && (
+                <div className="p-3 rounded-2xl bg-blue-50 border border-blue-200 text-blue-900 space-y-1">
+                  <span className="font-extrabold block">🔍 사실 확인 필요 ({factCheckAlerts.length}건)</span>
+                  <div className="text-[11px] space-y-0.5">
+                    {factCheckAlerts.map((f, i) => (
+                      <p key={i}>• {f.slideNum}장: "{f.phrase}" - {f.text}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {qualityReport.totalIssues === 0 && factCheckAlerts.length === 0 && (
+                <div className="p-6 text-center text-xs text-emerald-800 bg-emerald-50 rounded-2xl border border-emerald-200 font-extrabold">
+                  🎉 축하합니다! 글자 수, 금지어, 해시태그 한도를 모두 완벽히 준수하고 있습니다.
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowQualityModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-300 font-bold text-slate-700 text-xs"
+              >
+                닫기
+              </button>
+              <button
+                type="button"
+                onClick={handleAutoFixAllQualityIssues}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-extrabold text-xs shadow-md"
+              >
+                🛠️ 원클릭 자동 고치기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4-F. 올리기 좋은 시간 추천 모달 */}
+      {showBestTimesModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  ⏰ 인스타그램 올리기 좋은 시간 추천 (F)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  피드 반응이 가장 높은 최적의 시간대를 추천해 드려요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBestTimesModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            <div className="space-y-2.5">
+              {recommendedUploadTimes.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-blue-50/60 transition flex items-center justify-between gap-2"
+                >
+                  <div>
+                    <span className="text-xs font-extrabold text-slate-900 block">{item.label}</span>
+                    <span className="text-xs text-blue-700 font-bold block">{item.displayStr}</span>
+                    <span className="text-[11px] text-slate-500">{item.reason}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleApplyRecommendedTime(item.timeValue)}
+                    className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold flex-shrink-0 shadow-sm"
+                  >
+                    이 시간 예약
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4-G. 내 템플릿 저장 모달 */}
+      {showTemplateModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[82vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-base sm:text-lg font-extrabold text-slate-900">
+                  🎨 내 템플릿 저장 & 불러오기 (G)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  현재 스타일(장수, 템플릿, 색상, 폰트)을 저장해 두고 다음번에 바로 찍어낼 수 있어요.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTemplateModal(false)}
+                className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-extrabold text-slate-700"
+              >
+                닫기 ✕
+              </button>
+            </div>
+
+            {/* 현재 스타일 템플릿으로 저장하기 */}
+            <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 space-y-2">
+              <span className="text-xs font-extrabold text-indigo-950 block">
+                💾 현재 에디터 스타일 템플릿으로 저장
+              </span>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  value={newTemplateNameInput}
+                  onChange={(e) => setNewTemplateNameInput(e.target.value)}
+                  placeholder="템플릿 이름 (예: 내 시그니처 4장 템플릿)"
+                  className="flex-1 px-3 py-1.5 rounded-xl border border-indigo-200 text-xs bg-white font-bold"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveCurrentAsTemplate}
+                  className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold shadow-sm"
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+
+            {/* 저장된 템플릿 목록 */}
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {savedUserTemplates.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500 bg-slate-50 rounded-2xl border border-slate-200">
+                  아직 저장된 템플릿이 없습니다. 위에서 이름을 적고 <strong>[저장]</strong>을 눌러보세요!
+                </div>
+              ) : (
+                savedUserTemplates.map((tpl) => (
+                  <div
+                    key={tpl.id}
+                    className="p-3 rounded-2xl border border-slate-200 bg-slate-50 flex items-center justify-between gap-2"
+                  >
+                    <div>
+                      <span className="text-xs font-extrabold text-slate-900 block">{tpl.name}</span>
+                      <span className="text-[11px] text-slate-500">
+                        {tpl.slideCount}장 · {tpl.fontId} · {tpl.aspectRatio} · {tpl.templateId}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleApplyUserTemplate(tpl)}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-sm"
+                      >
+                        적용
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteUserTemplate(tpl.id)}
+                        className="px-2 py-1.5 rounded-xl bg-rose-50 text-rose-600 text-xs font-bold border border-rose-200"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 업로드 최종 확인 모달 */}
       {showConfirmModal && (
