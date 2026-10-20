@@ -17,13 +17,37 @@ import {
 import { ensureReadableColor, getReadableTextOnAccent } from '@/lib/contrast';
 import { getSupabaseBrowser } from '@/lib/supabase';
 import {
-  CustomFontItem,
   InstagramAccount,
   PostRecord,
-  SlideItem,
-  SlideLayoutType,
+  SlideItem as BaseSlideItem,
   UploadedPhoto,
 } from '@/types';
+
+export type SlideLayoutType = 'auto' | 'top-photo' | 'bottom-photo' | 'full-bleed' | 'split-left';
+
+export interface CustomFontItem {
+  id: string;
+  name: string;
+  base64Data: string;
+  mimeType?: string;
+}
+
+export interface SlideItem extends BaseSlideItem {
+  photoIndices?: number[];
+  photoUrls?: string[];
+  multiPhotoLayout?: 'auto' | 'row' | 'col' | 'grid' | 'collage';
+  photoZoom?: number;
+  overlayOpacity?: number;
+  layoutType?: SlideLayoutType;
+  textAlign?: 'left' | 'center' | 'right';
+  titleSize?: number;
+  bodySize?: number;
+  customTextColor?: string;
+  customBgColor?: string;
+  showBadge?: boolean;
+  showSlideNumber?: boolean;
+  footerText?: string;
+}
 
 function countHashtags(text: string): number {
   const matches = text.match(/#[^\s#]+/g);
