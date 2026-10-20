@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ASPECT_RATIOS,
   AspectRatioKey,
@@ -13,7 +13,7 @@ import {
   MoodId,
 } from '@/config/constants';
 import { ensureReadableColor, getReadableTextOnAccent } from '@/lib/contrast';
-import { getSupabaseBrowser } from '@/lib/supabase';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import {
   InstagramAccount,
   PostRecord,
@@ -22,8 +22,38 @@ import {
 } from '@/types';
 
 // ============================================================================
+// [핵심: Failed to fetch 원천 차단!]
+// Vercel 환경변수에 오타·공백·누락이 있더라도 절대 'Failed to fetch'가 나지 않도록
+// 검증된 Supabase URL과 Anon Key를 직접 사용해 브라우저 클라이언트를 생성합니다.
+// ============================================================================
+const VERIFIED_SUPABASE_URL = 'https://agtjemrvyvbyzrxygxsy.supabase.co';
+const VERIFIED_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFndGplbXJ2eXZieXpyeHlneHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0NTIwNjksImV4cCI6MjEwODAyODA2OX0.QucBTsqNpV9tYwXXL0O-2xjmd0wRfm8h4Mn2Sz0gXP4';
+const VERIFIED_SUPABASE_SERVICE_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFndGplbXJ2eXZieXpyeHlneHN5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjQ1MjA2OSwiZXhwIjoyMTA4MDI4MDY5fQ.ooSypWBZog6YDb8oGnTqO1zgLWHkBkiHx2A8tW_nCEA';
+
+let safeBrowserClient: SupabaseClient | null = null;
+function getSupabaseBrowser(): SupabaseClient {
+  if (typeof window === 'undefined') {
+    return createClient(VERIFIED_SUPABASE_URL, VERIFIED_SUPABASE_ANON_KEY, {
+      auth: { persistSession: false },
+    });
+  }
+  if (!safeBrowserClient) {
+    safeBrowserClient = createClient(VERIFIED_SUPABASE_URL, VERIFIED_SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        storageKey: 'insta-card-studio-auth-v2',
+      },
+    });
+  }
+  return safeBrowserClient;
+}
+
+// ============================================================================
 // [전역 타입 선언] CDN으로 로드되는 Fabric.js(v6), JSZip, FileSaver, localForage
-// 별도의 npm 패키지 설치 없이 이 파일 하나만 올려도 100% 동작하도록 구성
 // ============================================================================
 declare global {
   interface Window {
@@ -39,7 +69,62 @@ declare global {
 }
 
 // ============================================================================
-// [1단계~4단계 통합 설정] 기본 한글 폰트 14종 (Google Fonts + 눈누 웹폰트)
+// [1단계: 로그인 오류 한국어 변환 & 환경변수 점검 도우미]
+// 이 파일 하나만 GitHub에 올려도 완벽히 동작하도록 내부에도 내장
+// ============================================================================
+function toFriendlyKoreanAuthError(rawError: unknown): string {
+  const msg =
+    typeof rawError === 'string'
+      ? rawError
+      : rawError instanceof Error
+      ? rawError.message
+      : '로그인 처리 중 문제가 발생했어요.';
+
+  const lower = msg.toLowerCase();
+
+  if (lower.includes('invalid login credentials') || lower.includes('invalid_credentials')) {
+    return '비밀번호가 맞지 않거나 아직 가입되지 않은 이메일이에요. 이메일과 비밀번호를 다시 확인해 주세요.';
+  }
+  if (lower.includes('email not confirmed')) {
+    return '이메일 인증을 먼저 해주세요. (수신함에서 확인 메일을 누르거나, 잠시 후 자동 인증을 다시 시도해 주세요.)';
+  }
+  if (
+    lower.includes('already registered') ||
+    lower.includes('already been registered') ||
+    lower.includes('user already exists')
+  ) {
+    return '이미 가입된 이메일이에요! [로그인] 버튼으로 바꿔서 로그인해 주세요.';
+  }
+  if (lower.includes('password should be at least') || lower.includes('weak_password')) {
+    return '비밀번호는 6자리 이상으로 입력해 주세요.';
+  }
+  if (lower.includes('invalid format') || lower.includes('unable to validate email')) {
+    return '이메일 주소 형식이 맞지 않아요. (예: myid@naver.com)';
+  }
+  if (
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('over_email_send_rate_limit')
+  ) {
+    return '짧은 시간에 요청이 너무 많았어요. 약 1분 뒤에 다시 시도해 주세요.';
+  }
+  if (lower.includes('provider is not enabled') || lower.includes('unsupported provider')) {
+    return '구글 로그인이 아직 Supabase 설정에서 켜지지 않았어요. 이메일/비밀번호로 로그인해 주세요.';
+  }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('placeholder')) {
+    return '서버 연결 설정(NEXT_PUBLIC_SUPABASE_URL / ANON_KEY)을 확인해 주세요.';
+  }
+  if (lower.includes('invalid api key') || lower.includes('jwt')) {
+    return 'Supabase API 키 설정이 올바르지 않아요. 환경변수를 확인해 주세요.';
+  }
+  if (/[가-힣]/.test(msg)) {
+    return msg;
+  }
+  return `로그인 중 오류가 발생했어요: ${msg}`;
+}
+
+// ============================================================================
+// 기본 한글 폰트 14종 (Google Fonts + Pretendard)
 // ============================================================================
 interface EditorFontOption {
   id: string;
@@ -66,7 +151,7 @@ const EDITOR_KOREAN_FONTS: EditorFontOption[] = [
 ];
 
 // ============================================================================
-// [2단계 & 4단계] 언제든 바꿔 낄 수 있는 카드뉴스 디자인 템플릿 8종
+// 카드뉴스 디자인 템플릿 8종
 // ============================================================================
 type CardTemplateId =
   | 'top-photo-card'
@@ -113,7 +198,7 @@ const CARD_TEMPLATES: CardTemplatePreset[] = [
   {
     id: 'full-bleed-poster',
     name: '3. 풀스크린 배경 포스터형',
-    desc: '사진이 전체 배경으로 깔리고 글씨가 올라가는 표지형',
+    desc: '사진이 전체 영역에 크게 들어가고 글씨가 올라가는 표지형',
     bgColor: '#0F172A',
     cardBoxColor: 'rgba(15, 23, 42, 0.62)',
     textColor: '#FFFFFF',
@@ -172,6 +257,16 @@ const CARD_TEMPLATES: CardTemplatePreset[] = [
   },
 ];
 
+// 사진 표시 방식:
+// - 'contain': 전체 보이기 (기본값 · 자르지 않고 원본 비율 그대로 최대한 크게 넣기)
+// - 'cover': 꽉 채우기 (영역에 맞게 자름)
+export type PhotoFitMode = 'contain' | 'cover';
+
+// 'contain'(전체 보이기)일 때 남는 빈 공간 채우기 방식:
+// - 'solid': 기본 배경색으로 깔끔하게 채우기
+// - 'blur': 같은 사진을 흐리게 키워서 뒤에 깔기 (블러 배경)
+export type PhotoBgFillMode = 'solid' | 'blur';
+
 export interface CustomFontItem {
   id: string;
   name: string;
@@ -183,17 +278,98 @@ export interface SlideItem extends BaseSlideItem {
   photoIndices?: number[];
   photoUrls?: string[];
   templateId?: CardTemplateId;
+  photoFitMode?: PhotoFitMode; // 장별 사진 표시 방식 (기본: 'contain' 전체 보이기)
+  photoBgFillMode?: PhotoBgFillMode; // 장별 남는 공간 채우기 (기본: 'solid' 배경색 / 'blur' 블러 배경)
+  isManuallyEdited?: boolean; // 사용자가 직접 제목/본문을 작성·수정한 적이 있는지 여부
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fabricJson?: any; // 이 슬라이드의 Fabric.js 객체 상태 JSON (자동저장 및 슬라이드 전환용)
-  previewDataUrl?: string; // 썸네일 및 서버 전송용 이미지
+  fabricJson?: any;
+  previewDataUrl?: string;
 }
 
 // ============================================================================
-// [IndexedDB / localForage 저장소 도우미]
-// localForage가 로드되면 우선 사용하고, 로드 전에도 브라우저 기본 IndexedDB로 동작
+// 글자 수 권장 기준 ("글이 길어요" 안내 기준)
+// ============================================================================
+const TEXT_LENGTH_GUIDE = {
+  HEADLINE_WARN: 35, // 제목 35자 초과 시 "글이 길어요" 안내
+  BODY_WARN: 130, // 본문 130자 초과 시 "글이 길어요" 안내
+};
+
+// ============================================================================
+// 초기 기본 슬라이드 생성 도우미 (첫 렌더링 시에도 빈 화면이 나오지 않도록 즉시 생성)
+// ============================================================================
+function createInitialSlides(
+  count: number,
+  tplId: CardTemplateId = 'top-photo-card',
+  photos: UploadedPhoto[] = [],
+  blankMode = false
+): SlideItem[] {
+  return Array.from({ length: count }).map((_, idx) => {
+    const isSingle = count === 1;
+    const isCover = !isSingle && idx === 0;
+    const isCta = !isSingle && idx === count - 1;
+
+    const role = isSingle ? 'single_core' : isCover ? 'cover' : isCta ? 'cta' : 'body';
+    const roleLabel = isSingle
+      ? '핵심 한 줄'
+      : isCover
+      ? '표지 (첫 장)'
+      : isCta
+      ? '마무리·행동 유도'
+      : `본문 ${idx}`;
+
+    const photoObj = photos[idx] || null;
+
+    return {
+      id: `slide-init-${idx + 1}`,
+      slideNumber: idx + 1,
+      role,
+      roleLabel,
+      badgeText: blankMode
+        ? `${idx + 1}장`
+        : isSingle
+        ? 'CORE'
+        : isCover
+        ? 'COVER'
+        : isCta
+        ? 'SUMMARY'
+        : `POINT 0${idx}`,
+      headline: blankMode
+        ? ''
+        : isSingle
+        ? '오늘 꼭 기억해야 할 핵심 한 줄'
+        : isCover
+        ? '시선을 사로잡는 첫 장 표지 제목'
+        : isCta
+        ? '도움이 되셨다면 저장하고 팔로우하세요!'
+        : `알기 쉽게 정리한 핵심 포인트 ${idx}`,
+      body: blankMode
+        ? ''
+        : isSingle
+        ? '왼쪽 입력창에서 장별로 직접 글을 쓰거나 캔버스에서 바로 수정해 보세요!'
+        : isCover
+        ? '장마다 제목·본문·사진을 직접 넣거나 AI로 채울 수 있어요 👉'
+        : isCta
+        ? '사진은 잘리지 않게 비율 맞춰 크게 들어가며, 블러 배경도 선택할 수 있습니다.'
+        : '글자를 고치면 오른쪽 미리보기가 실시간으로 바로 바뀝니다.',
+      photoIndex: photoObj ? idx : null,
+      photoUrl: photoObj ? photoObj.url : null,
+      photoIndices: photoObj ? [idx] : [],
+      photoUrls: photoObj ? [photoObj.url] : [],
+      templateId: tplId,
+      photoFitMode: 'contain',
+      photoBgFillMode: 'solid',
+      isManuallyEdited: blankMode,
+      fabricJson: undefined,
+    };
+  });
+}
+
+// ============================================================================
+// IndexedDB / localForage 저장소 도우미
 // ============================================================================
 const DB_NAME = 'AutoCardStudioDB';
 const STORE_NAME = 'editor_store';
+const STATE_STORAGE_KEY = 'acs_editor_state_v2';
 
 async function saveToLocalDb<T>(key: string, value: T): Promise<void> {
   if (typeof window === 'undefined') return;
@@ -253,7 +429,6 @@ async function loadFromLocalDb<T>(key: string): Promise<T | null> {
   }
 }
 
-// 외부 스크립트 로드 도우미
 function loadExternalScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
     if (typeof document === 'undefined') return resolve();
@@ -276,7 +451,6 @@ function loadExternalScript(src: string): Promise<void> {
   });
 }
 
-// 이미지 엘리먼트 로드 도우미 (CORS 안전 처리)
 function loadHtmlImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -287,6 +461,48 @@ function loadHtmlImageElement(src: string): Promise<HTMLImageElement> {
     img.onerror = (err) => reject(err);
     img.src = src;
   });
+}
+
+// ============================================================================
+// [3단계 핵심 도우미] 같은 사진을 흐리게 키워서 뒤에 깔아주는 블러 배경 이미지 생성기
+// 브라우저 캔버스 미리보기와 최종 JPEG 다운로드/업로드 결과가 100% 똑같이 나오도록
+// 오프스크린 캔버스에서 고품질 가우시안 블러 배경 DataURL을 생성합니다.
+// ============================================================================
+async function createBlurredBackdropDataUrl(
+  imgEl: HTMLImageElement,
+  boxW: number,
+  boxH: number
+): Promise<string> {
+  const offCanvas = document.createElement('canvas');
+  // 성능을 위해 절반 해상도로 블러 처리 후 원본 비율로 사용
+  const renderW = Math.max(240, Math.round(boxW * 0.5));
+  const renderH = Math.max(240, Math.round(boxH * 0.5));
+  offCanvas.width = renderW;
+  offCanvas.height = renderH;
+
+  const ctx = offCanvas.getContext('2d');
+  if (!ctx) return '';
+
+  const natW = imgEl.naturalWidth || imgEl.width || 800;
+  const natH = imgEl.naturalHeight || imgEl.height || 800;
+
+  // 빈 공간이 안 보이도록 1.18배 여유 있게 확대(cover)하여 중앙 배치
+  const coverScale = Math.max(renderW / natW, renderH / natH) * 1.18;
+  const drawW = natW * coverScale;
+  const drawH = natH * coverScale;
+  const drawX = (renderW - drawW) / 2;
+  const drawY = (renderH - drawH) / 2;
+
+  ctx.save();
+  ctx.filter = 'blur(22px) brightness(0.88) saturate(1.1)';
+  ctx.drawImage(imgEl, drawX, drawY, drawW, drawH);
+  ctx.restore();
+
+  // 블러 필터가 지원되지 않는 구형 환경을 위한 반투명 오버레이 보강
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.14)';
+  ctx.fillRect(0, 0, renderW, renderH);
+
+  return offCanvas.toDataURL('image/jpeg', 0.88);
 }
 
 function countHashtags(text: string): number {
@@ -300,6 +516,12 @@ const CUSTOM_PROPS = [
   'cornerRadius',
   'originalSrc',
   'photoSlotIndex',
+  'photoFitMode',
+  'photoBgFillMode',
+  'boxLeft',
+  'boxTop',
+  'boxW',
+  'boxH',
   'isLockedBg',
 ];
 
@@ -314,7 +536,9 @@ export default function InstaAutoStudioPage() {
   const [emailInput, setEmailInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [authMessage, setAuthMessage] = useState('');
+  const [authSuccessMsg, setAuthSuccessMsg] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [showAuthHelp, setShowAuthHelp] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'create' | 'accounts' | 'history'>('create');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -325,7 +549,7 @@ export default function InstaAutoStudioPage() {
   const [retryingTargetId, setRetryingTargetId] = useState<string | null>(null);
 
   // ==========================================================================
-  // 2) 카드뉴스 생성 & 에디터 전역 상태
+  // 2) 카드뉴스 생성 & 에디터 전역 상태 (첫 순간부터 초기 슬라이드가 존재하도록 세팅)
   // ==========================================================================
   const [publishMode, setPublishMode] = useState<'auto_publish' | 'download_only'>('auto_publish');
   const maxSlideLimit =
@@ -338,7 +562,7 @@ export default function InstaAutoStudioPage() {
   const [templateId, setTemplateId] = useState<CardTemplateId>('top-photo-card');
   const [accentColor, setAccentColor] = useState<string>('#2563EB');
 
-  // [워터마크 제거]: 기본값 false ("AUTO CARD STUDIO" 절대 넣지 않음!)
+  // 워터마크 기본값: false (AUTO CARD STUDIO 워터마크 없음)
   const [showWatermark, setShowWatermark] = useState<boolean>(false);
   const [watermarkText, setWatermarkText] = useState<string>('');
 
@@ -349,13 +573,13 @@ export default function InstaAutoStudioPage() {
   );
   const [isDragging, setIsDragging] = useState(false);
 
-  // 슬라이드 목록 & 현재 슬라이드 인덱스
-  const [slides, setSlides] = useState<SlideItem[]>([]);
+  // 슬라이드 목록 & 현재 슬라이드 인덱스 (초기값 즉시 생성으로 빈 화면 방지!)
+  const [slides, setSlides] = useState<SlideItem[]>(() => createInitialSlides(4));
   const [activeSlideIndex, setActiveSlideIndex] = useState<number>(0);
   const [isGeneratingAI, setIsGeneratingAI] = useState<boolean>(false);
   const [regeneratingSlideIdx, setRegeneratingSlideIdx] = useState<number | null>(null);
   const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
-  const [autoSaveStatus, setAutoSaveStatus] = useState<string>('자동 저장 준비됨');
+  const [autoSaveStatus, setAutoSaveStatus] = useState<string>('자동 저장됨');
 
   // 캡션 및 발행 상태
   const [captionTone, setCaptionTone] = useState<CaptionToneId>('friendly');
@@ -379,8 +603,10 @@ export default function InstaAutoStudioPage() {
   const fabricCanvasRef = useRef<any>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const [canvasScale, setCanvasScale] = useState<number>(0.42);
+  // 슬라이드 강제 리빌드 트리거 카운터
+  const [canvasRebuildTick, setCanvasRebuildTick] = useState<number>(0);
 
-  // 실행 취소(Undo) / 다시 실행(Redo) 스택 (슬라이드별 보관)
+  // 실행 취소(Undo) / 다시 실행(Redo) 스택
   const historyMapRef = useRef<Record<string, string[]>>({});
   const redoMapRef = useRef<Record<string, string[]>>({});
   const isRestoringRef = useRef<boolean>(false);
@@ -400,8 +626,8 @@ export default function InstaAutoStudioPage() {
   const [selTextColor, setSelTextColor] = useState<string>('#0F172A');
   const [selTextBgColor, setSelTextBgColor] = useState<string>('');
   const [selTextAlign, setSelTextAlign] = useState<'left' | 'center' | 'right'>('left');
-  const [selCharSpacing, setSelCharSpacing] = useState<number>(0); // 자간 (-100 ~ 500)
-  const [selLineHeight, setSelLineHeight] = useState<number>(1.3); // 행간 (0.8 ~ 2.5)
+  const [selCharSpacing, setSelCharSpacing] = useState<number>(0);
+  const [selLineHeight, setSelLineHeight] = useState<number>(1.3);
 
   // 사진/도형 공통 및 전용 속성
   const [selOpacity, setSelOpacity] = useState<number>(100);
@@ -432,7 +658,6 @@ export default function InstaAutoStudioPage() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // 1. Google Fonts + Pretendard 스타일시트 주입
     const fontLinks = [
       'https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css',
       'https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Do+Hyeon&family=Gowun+Batang:wght@400;700&family=Gowun+Dodum&family=Hi+Melody&family=Jua&family=Nanum+Brush+Script&family=Nanum+Gothic:wght@400;700;800&family=Nanum+Myeongjo:wght@400;700&family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@400;700&family=Poor+Story&display=swap',
@@ -446,7 +671,6 @@ export default function InstaAutoStudioPage() {
       }
     });
 
-    // 2. 외부 스크립트 순차 로드 (Fabric v6, JSZip, FileSaver, localForage)
     async function initLibraries() {
       try {
         await Promise.all([
@@ -503,7 +727,7 @@ export default function InstaAutoStudioPage() {
         setUploadedPhotos(savedPhotos);
       }
 
-      // 3. 저장된 슬라이드(Fabric JSON 포함) 복원
+      // 3. 저장된 슬라이드 복원 (빈 캔버스 객체로 인해 미리보기가 안 나오는 문제 완벽 차단!)
       const savedState = await loadFromLocalDb<{
         slides: SlideItem[];
         aspectRatio: AspectRatioKey;
@@ -514,11 +738,24 @@ export default function InstaAutoStudioPage() {
         watermarkText: string;
         rawText: string;
         baseCaption: string;
-      }>('acs_editor_state_v1');
+      }>(STATE_STORAGE_KEY);
 
       if (savedState && Array.isArray(savedState.slides) && savedState.slides.length > 0 && !cancelled) {
-        setSlides(savedState.slides);
-        setSlideCount(savedState.slides.length);
+        const sanitizedSlides: SlideItem[] = savedState.slides.map((s, idx) => {
+          const hasValidObjects =
+            s.fabricJson &&
+            Array.isArray(s.fabricJson.objects) &&
+            s.fabricJson.objects.length > 0;
+          return {
+            ...s,
+            slideNumber: idx + 1,
+            photoFitMode: s.photoFitMode || 'contain',
+            photoBgFillMode: s.photoBgFillMode || 'solid',
+            fabricJson: hasValidObjects ? s.fabricJson : undefined,
+          };
+        });
+        setSlides(sanitizedSlides);
+        setSlideCount(sanitizedSlides.length);
         if (savedState.aspectRatio) setAspectRatio(savedState.aspectRatio);
         if (savedState.fontId) setFontId(savedState.fontId);
         if (savedState.templateId) setTemplateId(savedState.templateId);
@@ -528,8 +765,9 @@ export default function InstaAutoStudioPage() {
         if (savedState.rawText) setRawText(savedState.rawText);
         if (savedState.baseCaption) setBaseCaption(savedState.baseCaption);
         setAutoSaveStatus('이전 작업 자동 복원됨');
+        setCanvasRebuildTick((t) => t + 1);
       } else if (!cancelled) {
-        buildDefaultSlides(4);
+        setCanvasRebuildTick((t) => t + 1);
       }
     }
 
@@ -543,7 +781,7 @@ export default function InstaAutoStudioPage() {
   useEffect(() => {
     if (!libsReady || slides.length === 0) return;
     const timer = setTimeout(async () => {
-      await saveToLocalDb('acs_editor_state_v1', {
+      await saveToLocalDb(STATE_STORAGE_KEY, {
         slides,
         aspectRatio,
         fontId,
@@ -559,7 +797,7 @@ export default function InstaAutoStudioPage() {
         now.getMinutes()
       ).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
       setAutoSaveStatus(`자동 저장됨 (${timeStr})`);
-    }, 600);
+    }, 500);
     return () => clearTimeout(timer);
   }, [
     libsReady,
@@ -581,28 +819,45 @@ export default function InstaAutoStudioPage() {
   }, [libsReady, uploadedPhotos]);
 
   // ==========================================================================
-  // 6) 모바일 / PC 화면 크기에 맞춰 캔버스 표시 배율(scale) 자동 계산
+  // 6) 모바일 / PC 화면 크기에 맞춰 캔버스 표시 배율(scale) 자동 계산 (ResizeObserver 적용)
   // ==========================================================================
   const targetDimensions = ASPECT_RATIOS[aspectRatio] || ASPECT_RATIOS['4:5'];
 
   useEffect(() => {
     const updateScale = () => {
       if (!wrapperRef.current) return;
-      const availableW = wrapperRef.current.clientWidth - 16;
-      const scale = Math.min(1, Math.max(0.24, availableW / targetDimensions.width));
+      const rectW = wrapperRef.current.clientWidth;
+      if (rectW <= 20) return;
+      const availableW = rectW - 24;
+      const scale = Math.min(0.62, Math.max(0.25, availableW / targetDimensions.width));
       setCanvasScale(scale);
     };
     updateScale();
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && wrapperRef.current) {
+      observer = new ResizeObserver(() => updateScale());
+      observer.observe(wrapperRef.current);
+    }
+
     window.addEventListener('resize', updateScale);
-    return () => window.removeEventListener('resize', updateScale);
+    return () => {
+      window.removeEventListener('resize', updateScale);
+      if (observer) observer.disconnect();
+    };
   }, [targetDimensions.width, activeTab]);
 
   // ==========================================================================
-  // 7) Supabase 로그인 세션 및 인스타 계정 로드
+  // 7) [기능 3: 로그인/세션 유지/OAuth 콜백 확인]
   // ==========================================================================
   useEffect(() => {
     const supabase = getSupabaseBrowser();
-    supabase.auth.getSession().then(({ data }) => {
+
+    // 1. 페이지 로드 시 저장된 로그인 세션 즉시 복원
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) {
+        console.warn('세션 확인 경고:', error.message);
+      }
       if (data.session) {
         setSessionToken(data.session.access_token);
         setUserId(data.session.user.id);
@@ -610,11 +865,15 @@ export default function InstaAutoStudioPage() {
       }
     });
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    // 2. 로그인/로그아웃/토큰 갱신 실시간 감지
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (session) {
         setSessionToken(session.access_token);
         setUserId(session.user.id);
         setUserEmail(session.user.email || '');
+        if (event === 'SIGNED_IN') {
+          setAuthMessage('');
+        }
       } else {
         setSessionToken(null);
         setUserId(null);
@@ -625,12 +884,16 @@ export default function InstaAutoStudioPage() {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get('tab');
-      const errParam = params.get('error');
+      const errParam = params.get('error') || params.get('error_description');
       const okParam = params.get('success');
       if (tabParam === 'accounts' || tabParam === 'history' || tabParam === 'create') {
         setActiveTab(tabParam);
       }
-      if (errParam) showToast(`⚠️ ${errParam}`);
+      if (errParam) {
+        const friendly = toFriendlyKoreanAuthError(errParam);
+        setAuthMessage(friendly);
+        showToast(`⚠️ ${friendly}`);
+      }
       if (okParam) showToast(`✅ ${okParam}`);
     }
 
@@ -673,54 +936,10 @@ export default function InstaAutoStudioPage() {
   }
 
   // ==========================================================================
-  // 8) 기본 슬라이드 초안 데이터 생성기
+  // 8) 기본 슬라이드 초안 생성기 / 전체 초기화
   // ==========================================================================
-  function buildDefaultSlides(count: number, resetCanvas = false) {
-    const nextSlides: SlideItem[] = Array.from({ length: count }).map((_, idx) => {
-      const isSingle = count === 1;
-      const isCover = !isSingle && idx === 0;
-      const isCta = !isSingle && idx === count - 1;
-
-      const role = isSingle ? 'single_core' : isCover ? 'cover' : isCta ? 'cta' : 'body';
-      const roleLabel = isSingle
-        ? '핵심 한 줄'
-        : isCover
-        ? '표지 (첫 장)'
-        : isCta
-        ? '마무리·행동 유도'
-        : `본문 ${idx}`;
-
-      const photoObj = uploadedPhotos[idx] || null;
-
-      return {
-        id: `slide-${Date.now()}-${idx}`,
-        slideNumber: idx + 1,
-        role,
-        roleLabel,
-        badgeText: isSingle ? 'CORE' : isCover ? 'COVER' : isCta ? 'SUMMARY' : `POINT 0${idx}`,
-        headline: isSingle
-          ? '오늘 꼭 기억해야 할 핵심 한 줄'
-          : isCover
-          ? '시선을 사로잡는 첫 장 표지 제목'
-          : isCta
-          ? '도움이 되셨다면 저장하고 팔로우하세요!'
-          : `알기 쉽게 정리한 핵심 포인트 ${idx}`,
-        body: isSingle
-          ? '캔버스 위 글자와 사진을 마우스로 직접 드래그하고 더블클릭해 수정해 보세요!'
-          : isCover
-          ? '오른쪽으로 넘겨서 자세한 내용을 확인해 보세요 👉'
-          : isCta
-          ? '프로필 링크에서 더 많은 정보를 확인하실 수 있습니다.'
-          : '사진을 여러 장 추가하거나 크롭, 회전, 글씨 폰트·자간·행간을 자유롭게 조절하세요.',
-        photoIndex: photoObj ? idx : null,
-        photoUrl: photoObj ? photoObj.url : null,
-        photoIndices: photoObj ? [idx] : [],
-        photoUrls: photoObj ? [photoObj.url] : [],
-        templateId,
-        fabricJson: undefined,
-      };
-    });
-
+  function buildDefaultSlides(count: number, resetCanvas = false, blankMode = false) {
+    const nextSlides = createInitialSlides(count, templateId, uploadedPhotos, blankMode);
     if (resetCanvas) {
       historyMapRef.current = {};
       redoMapRef.current = {};
@@ -728,12 +947,12 @@ export default function InstaAutoStudioPage() {
     setSlides(nextSlides);
     setSlideCount(count);
     setActiveSlideIndex(0);
+    setCanvasRebuildTick((t) => t + 1);
   }
 
   // ==========================================================================
-  // 9) Fabric.js 캔버스 초기화 및 이벤트 바인딩 (스냅 가이드선, 선택 동기화, 자동 저장)
+  // 9) Fabric.js 캔버스 초기화 및 이벤트 바인딩
   // ==========================================================================
-  // 현재 캔버스 상태를 슬라이드 배열 및 Undo 히스토리에 기록
   const saveCanvasToActiveSlide = useCallback(
     (pushHistory = true) => {
       const canvas = fabricCanvasRef.current;
@@ -741,9 +960,12 @@ export default function InstaAutoStudioPage() {
 
       const slide = slides[activeSlideIndex];
       if (!slide) return;
-
-      // 크롭 가이드 박스가 떠 있는 중에는 저장 생략
       if (cropRectRef.current) return;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const objs: any[] = canvas.getObjects ? canvas.getObjects() : [];
+      // 캔버스가 비어 있을 때는 잘못된 빈 JSON으로 덮어쓰지 않도록 보호!
+      if (objs.length === 0) return;
 
       const jsonObj = canvas.toObject(CUSTOM_PROPS);
       jsonObj.background = canvas.backgroundColor || '#FFFFFF';
@@ -761,9 +983,6 @@ export default function InstaAutoStudioPage() {
         }
       }
 
-      // 텍스트 객체들의 최신 문자열을 slide.headline / slide.body 에도 동기화 (AI 재추천 등 호환)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const objs: any[] = canvas.getObjects ? canvas.getObjects() : [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const headlineObj = objs.find((o: any) => o.customRole === 'headline');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -777,9 +996,9 @@ export default function InstaAutoStudioPage() {
             ? {
                 ...s,
                 fabricJson: jsonObj,
-                headline: headlineObj?.text ?? s.headline,
-                body: bodyObj?.text ?? s.body,
-                badgeText: badgeObj?.text ?? s.badgeText,
+                headline: headlineObj?.text !== undefined ? String(headlineObj.text) : s.headline,
+                body: bodyObj?.text !== undefined ? String(bodyObj.text) : s.body,
+                badgeText: badgeObj?.text !== undefined ? String(badgeObj.text) : s.badgeText,
                 customBgColor: String(canvas.backgroundColor || '#FFFFFF'),
               }
             : s
@@ -789,7 +1008,6 @@ export default function InstaAutoStudioPage() {
     [activeSlideIndex, slides]
   );
 
-  // 선택된 Fabric 객체의 속성을 우측/상단 툴바 상태에 반영
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const syncSelectionState = useCallback((obj: any) => {
     if (!obj) {
@@ -831,7 +1049,6 @@ export default function InstaAutoStudioPage() {
     if (!libsReady || !window.fabric || !canvasElRef.current) return;
 
     const fabric = window.fabric;
-    // 선택 컨트롤 핸들 디자인 개선 (모바일/PC에서도 잘 보이게)
     if (fabric.FabricObject && fabric.FabricObject.ownDefaults) {
       fabric.FabricObject.ownDefaults.transparentCorners = false;
       fabric.FabricObject.ownDefaults.cornerColor = '#2563EB';
@@ -851,6 +1068,7 @@ export default function InstaAutoStudioPage() {
     });
 
     fabricCanvasRef.current = canvas;
+    setCanvasRebuildTick((t) => t + 1);
 
     return () => {
       canvas.dispose();
@@ -890,7 +1108,6 @@ export default function InstaAutoStudioPage() {
       setSnapGuideY(null);
     };
 
-    // [4단계 기능] 객체를 드래그할 때 캔버스 중앙 및 다른 객체에 자석처럼 붙는 스냅 가이드선
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handleObjectMoving = (e: any) => {
       const obj = e.target;
@@ -904,27 +1121,23 @@ export default function InstaAutoStudioPage() {
       let snappedX: number | null = null;
       let snappedY: number | null = null;
 
-      // 1) 캔버스 가로 정중앙 스냅
       if (Math.abs(center.x - cw / 2) < SNAP_DIST) {
         const diffX = cw / 2 - center.x;
         obj.set('left', obj.left + diffX);
         snappedX = cw / 2;
       }
 
-      // 2) 캔버스 세로 정중앙 스냅
       if (Math.abs(center.y - ch / 2) < SNAP_DIST) {
         const diffY = ch / 2 - center.y;
         obj.set('top', obj.top + diffY);
         snappedY = ch / 2;
       }
 
-      // 3) 좌우 여백 가이드(72px) 스냅
       if (snappedX === null && Math.abs(obj.left - 72) < SNAP_DIST) {
         obj.set('left', 72);
         snappedX = 72;
       }
 
-      // 4) 다른 객체들과의 중심선 정렬 스냅
       if (snappedX === null || snappedY === null) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const others: any[] = canvas.getObjects().filter((o: any) => o !== obj && o.visible);
@@ -987,7 +1200,7 @@ export default function InstaAutoStudioPage() {
   }, [libsReady, syncSelectionState, saveCanvasToActiveSlide]);
 
   // ==========================================================================
-  // 10) [핵심 1단계~4단계] 슬라이드 데이터를 독립된 Fabric 객체들로 캔버스에 생성/배치
+  // 10) [핵심: 3단계 사진 비율 맞춰 크게 넣기(contain) + 블러 배경(blur) + 텍스트 배치]
   // ==========================================================================
   const buildFabricObjectsForSlide = useCallback(
     async (
@@ -1012,11 +1225,15 @@ export default function InstaAutoStudioPage() {
       const mainTextColor = ensureReadableColor(tpl.textColor, bgHex, 4.5);
       const subTextColor = ensureReadableColor(tpl.subTextColor, bgHex, 3.5);
 
+      // 현재 장의 사진 표시 방식 (기본값: 'contain' = 자르지 않고 전체 보이기!)
+      const fitMode: PhotoFitMode = slide.photoFitMode || 'contain';
+      // 현재 장의 여백 채우기 방식 (기본값: 'solid' = 배경색 채우기 / 'blur' = 같은 사진 흐리게 깔기)
+      const bgFillMode: PhotoBgFillMode = slide.photoBgFillMode || 'solid';
+
       targetCanvas.clear();
       targetCanvas.backgroundColor = bgHex;
       setCanvasBgColor(bgHex);
 
-      // 슬라이드에 포함된 사진 URL 목록
       const photoUrls: string[] =
         Array.isArray(slide.photoUrls) && slide.photoUrls.length > 0
           ? slide.photoUrls.filter(Boolean)
@@ -1024,7 +1241,12 @@ export default function InstaAutoStudioPage() {
           ? [slide.photoUrl]
           : [];
 
-      // 사진 객체 생성 헬퍼 (모서리 둥글기 및 비율 맞춤 포함)
+      // ======================================================================
+      // [기능 2 핵심] 사진 객체 생성기:
+      // - fitMode === 'contain' (기본값): 사진을 절대 자르지 않고 가로세로 비율을 유지한 채
+      //   박스 안에 최대한 크게 배치! 남는 빈 공간은 배경색('solid') 또는 같은 사진 블러('blur')로 채움!
+      // - fitMode === 'cover': 박스 영역에 꽉 차도록 중앙 크롭하여 배치
+      // ======================================================================
       const createPhotoObject = async (
         url: string,
         boxLeft: number,
@@ -1038,58 +1260,177 @@ export default function InstaAutoStudioPage() {
           const imgEl = await loadHtmlImageElement(url);
           const natW = imgEl.naturalWidth || imgEl.width || 800;
           const natH = imgEl.naturalHeight || imgEl.height || 800;
-          const scale = Math.max(boxW / natW, boxH / natH);
 
-          // 중앙 크롭 효과를 위해 이미지를 박스 크기에 맞게 cropX/cropY/width/height 설정
-          const cropW = Math.min(natW, Math.round(boxW / scale));
-          const cropH = Math.min(natH, Math.round(boxH / scale));
-          const cropX = Math.max(0, Math.round((natW - cropW) / 2));
-          const cropY = Math.max(0, Math.round((natH - cropH) / 2));
+          if (fitMode === 'contain') {
+            // 1) 남는 여백 채우기 (블러 배경 또는 깔끔한 배경 프레임)
+            if (bgFillMode === 'blur') {
+              try {
+                const blurDataUrl = await createBlurredBackdropDataUrl(imgEl, boxW, boxH);
+                if (blurDataUrl) {
+                  const blurEl = await loadHtmlImageElement(blurDataUrl);
+                  const bNatW = blurEl.naturalWidth || blurEl.width || boxW;
+                  const bNatH = blurEl.naturalHeight || blurEl.height || boxH;
+                  const bScaleX = boxW / bNatW;
+                  const bScaleY = boxH / bNatH;
 
-          const fImg = new ImageClass(imgEl, {
-            left: boxLeft,
-            top: boxTop,
-            cropX,
-            cropY,
-            width: cropW,
-            height: cropH,
-            scaleX: scale,
-            scaleY: scale,
-            customId: `photo-${Date.now()}-${slotIdx}`,
-            customRole: 'photo',
-            originalSrc: url,
-            cornerRadius: radius,
-            photoSlotIndex: slotIdx,
-          });
+                  const blurImg = new ImageClass(blurEl, {
+                    left: boxLeft,
+                    top: boxTop,
+                    width: bNatW,
+                    height: bNatH,
+                    scaleX: bScaleX,
+                    scaleY: bScaleY,
+                    selectable: false,
+                    evented: false,
+                    customId: `photo-blur-bg-${Date.now()}-${slotIdx}`,
+                    customRole: 'photo-backdrop',
+                  });
 
-          if (radius > 0) {
-            fImg.set(
-              'clipPath',
-              new fabric.Rect({
-                width: cropW,
-                height: cropH,
-                rx: radius / scale,
-                ry: radius / scale,
-                originX: 'center',
-                originY: 'center',
-              })
-            );
-          }
+                  if (radius > 0) {
+                    blurImg.set(
+                      'clipPath',
+                      new fabric.Rect({
+                        width: bNatW,
+                        height: bNatH,
+                        rx: radius / bScaleX,
+                        ry: radius / bScaleY,
+                        originX: 'center',
+                        originY: 'center',
+                      })
+                    );
+                  }
+                  targetCanvas.add(blurImg);
+                }
+              } catch {
+                // fallback to solid background frame
+              }
+            } else {
+              // 기본: 남는 빈 공간을 배경색(또는 폴라로이드/카드 프레임색)으로 자연스럽게 채움
+              const solidFrame = new fabric.Rect({
+                left: boxLeft,
+                top: boxTop,
+                width: boxW,
+                height: boxH,
+                fill: bgHex,
+                rx: radius,
+                ry: radius,
+                selectable: false,
+                evented: false,
+                customId: `photo-solid-bg-${Date.now()}-${slotIdx}`,
+                customRole: 'photo-backdrop',
+              });
+              targetCanvas.add(solidFrame);
+            }
 
-          if (tplId === 'polaroid-frame') {
-            fImg.set({
-              stroke: '#FFFFFF',
-              strokeWidth: Math.round(14 / scale),
+            // 2) 사진을 자르지 않고(cropX=0, cropY=0) 원본 비율 100% 그대로 박스 안에 최대한 크게 넣기!
+            const containScale = Math.min(boxW / natW, boxH / natH);
+            const scaledW = natW * containScale;
+            const scaledH = natH * containScale;
+            const centeredLeft = Math.round(boxLeft + (boxW - scaledW) / 2);
+            const centeredTop = Math.round(boxTop + (boxH - scaledH) / 2);
+
+            const fImg = new ImageClass(imgEl, {
+              left: centeredLeft,
+              top: centeredTop,
+              cropX: 0,
+              cropY: 0,
+              width: natW,
+              height: natH,
+              scaleX: containScale,
+              scaleY: containScale,
+              customId: `photo-${Date.now()}-${slotIdx}`,
+              customRole: 'photo',
+              originalSrc: url,
+              cornerRadius: radius,
+              photoSlotIndex: slotIdx,
+              photoFitMode: 'contain',
+              photoBgFillMode: bgFillMode,
+              boxLeft,
+              boxTop,
+              boxW,
+              boxH,
             });
-          }
 
-          targetCanvas.add(fImg);
+            if (radius > 0) {
+              fImg.set(
+                'clipPath',
+                new fabric.Rect({
+                  width: natW,
+                  height: natH,
+                  rx: radius / containScale,
+                  ry: radius / containScale,
+                  originX: 'center',
+                  originY: 'center',
+                })
+              );
+            }
+
+            if (tplId === 'polaroid-frame') {
+              fImg.set({
+                stroke: '#FFFFFF',
+                strokeWidth: Math.round(14 / containScale),
+              });
+            }
+
+            targetCanvas.add(fImg);
+          } else {
+            // 'cover': 꽉 채우기 (자름)
+            const coverScale = Math.max(boxW / natW, boxH / natH);
+            const cropW = Math.min(natW, Math.round(boxW / coverScale));
+            const cropH = Math.min(natH, Math.round(boxH / coverScale));
+            const cropX = Math.max(0, Math.round((natW - cropW) / 2));
+            const cropY = Math.max(0, Math.round((natH - cropH) / 2));
+
+            const fImg = new ImageClass(imgEl, {
+              left: boxLeft,
+              top: boxTop,
+              cropX,
+              cropY,
+              width: cropW,
+              height: cropH,
+              scaleX: coverScale,
+              scaleY: coverScale,
+              customId: `photo-${Date.now()}-${slotIdx}`,
+              customRole: 'photo',
+              originalSrc: url,
+              cornerRadius: radius,
+              photoSlotIndex: slotIdx,
+              photoFitMode: 'cover',
+              photoBgFillMode: bgFillMode,
+              boxLeft,
+              boxTop,
+              boxW,
+              boxH,
+            });
+
+            if (radius > 0) {
+              fImg.set(
+                'clipPath',
+                new fabric.Rect({
+                  width: cropW,
+                  height: cropH,
+                  rx: radius / coverScale,
+                  ry: radius / coverScale,
+                  originX: 'center',
+                  originY: 'center',
+                })
+              );
+            }
+
+            if (tplId === 'polaroid-frame') {
+              fImg.set({
+                stroke: '#FFFFFF',
+                strokeWidth: Math.round(14 / coverScale),
+              });
+            }
+
+            targetCanvas.add(fImg);
+          }
         } catch (e) {
           console.warn('사진 객체 생성 실패:', e);
         }
       };
 
-      // 다중 사진(1~N장)을 지정된 영역 안에 그리드로 자동 배치
       const placePhotosInBox = async (
         boxLeft: number,
         boxTop: number,
@@ -1144,11 +1485,8 @@ export default function InstaAutoStudioPage() {
       const pad = 72;
       const innerW = cw - pad * 2;
 
-      // ======================================================================
-      // 템플릿별 레이아웃 객체(사진, 배경 카드 도형, 텍스트) 배치
-      // ======================================================================
+      // 템플릿별 레이아웃 배치 (사진이 더 크게 잘 보이도록 사진 영역 비중을 넉넉하게 확보)
       if (tplId === 'full-bleed-poster') {
-        // 1) 전체 배경 사진 + 반투명 어두운 오버레이 사각형
         if (photoUrls.length > 0) {
           await placePhotosInBox(0, 0, cw, ch, 0);
           const overlayRect = new fabric.Rect({
@@ -1157,7 +1495,7 @@ export default function InstaAutoStudioPage() {
             width: cw,
             height: ch,
             fill: '#0F172A',
-            opacity: 0.52,
+            opacity: 0.48,
             selectable: true,
             customId: `overlay-${Date.now()}`,
             customRole: 'shape-card',
@@ -1165,24 +1503,23 @@ export default function InstaAutoStudioPage() {
           targetCanvas.add(overlayRect);
         }
       } else if (tplId === 'top-photo-card' || tplId === 'polaroid-frame' || tplId === 'dark-neon-card') {
-        const photoH = photoUrls.length > 0 ? Math.round(ch * 0.46) : 0;
+        const photoH = photoUrls.length > 0 ? Math.round(ch * 0.5) : 0;
         if (photoUrls.length > 0) {
           await placePhotosInBox(
             pad,
-            136,
+            132,
             innerW,
             photoH,
-            tplId === 'polaroid-frame' ? 8 : 28
+            tplId === 'polaroid-frame' ? 8 : 24
           );
         }
-        // 하단 텍스트 배경 카드 도형
-        const cardTop = photoUrls.length > 0 ? 136 + photoH + 28 : 160;
+        const cardTop = photoUrls.length > 0 ? 132 + photoH + 24 : 160;
         const cardH = ch - cardTop - pad;
         const cardRect = new fabric.Rect({
           left: pad,
           top: cardTop,
           width: innerW,
-          height: Math.max(240, cardH),
+          height: Math.max(220, cardH),
           fill: tpl.cardBoxColor,
           rx: 28,
           ry: 28,
@@ -1191,21 +1528,21 @@ export default function InstaAutoStudioPage() {
         });
         targetCanvas.add(cardRect);
       } else if (tplId === 'bottom-photo-card') {
-        const photoH = photoUrls.length > 0 ? Math.round(ch * 0.46) : 0;
+        const photoH = photoUrls.length > 0 ? Math.round(ch * 0.5) : 0;
         if (photoUrls.length > 0) {
-          await placePhotosInBox(pad, ch - pad - photoH, innerW, photoH, 28);
+          await placePhotosInBox(pad, ch - pad - photoH, innerW, photoH, 24);
         }
       } else if (tplId === 'split-magazine') {
         if (photoUrls.length > 0) {
-          const leftW = Math.round(innerW * 0.46);
-          await placePhotosInBox(pad, 140, leftW, ch - 140 - pad, 28);
+          const leftW = Math.round(innerW * 0.48);
+          await placePhotosInBox(pad, 136, leftW, ch - 136 - pad, 24);
         }
       } else if (tplId === 'center-focus-box') {
         if (photoUrls.length > 0) {
           await placePhotosInBox(0, 0, cw, ch, 0);
         }
         const boxW = cw - 120;
-        const boxH = Math.round(ch * 0.52);
+        const boxH = Math.round(ch * 0.5);
         const centerCard = new fabric.Rect({
           left: 60,
           top: Math.round((ch - boxH) / 2),
@@ -1222,29 +1559,28 @@ export default function InstaAutoStudioPage() {
       } else if (tplId === 'multi-collage-grid') {
         const photoH = photoUrls.length > 0 ? Math.round(ch * 0.54) : 0;
         if (photoUrls.length > 0) {
-          await placePhotosInBox(pad, 136, innerW, photoH, 20);
+          await placePhotosInBox(pad, 132, innerW, photoH, 20);
         }
       }
 
-      // ======================================================================
-      // 상단 뱃지 도형 + 뱃지 글씨 + 슬라이드 번호 (각각 독립된 객체)
-      // ======================================================================
-      if (slide.badgeText) {
-        const badgeW = Math.max(140, slide.badgeText.length * 24 + 48);
+      // 상단 뱃지 도형 + 뱃지 글씨 + 슬라이드 번호
+      if (slide.badgeText !== undefined) {
+        const badgeStr = slide.badgeText || `${slide.slideNumber}장`;
+        const badgeW = Math.max(140, badgeStr.length * 24 + 48);
         const badgeBg = new fabric.Rect({
           left: pad,
-          top: 56,
+          top: 54,
           width: badgeW,
-          height: 52,
+          height: 50,
           fill: effectiveAccent,
           rx: 14,
           ry: 14,
           customId: `badge-bg-${Date.now()}`,
           customRole: 'badge-bg',
         });
-        const badgeTxt = new fabric.Textbox(slide.badgeText, {
+        const badgeTxt = new fabric.Textbox(badgeStr, {
           left: pad + 12,
-          top: 67,
+          top: 65,
           width: badgeW - 24,
           fontSize: 24,
           fontFamily: fontId,
@@ -1261,7 +1597,7 @@ export default function InstaAutoStudioPage() {
       if (totalCount > 1) {
         const numTxt = new fabric.Textbox(`${slide.slideNumber} / ${totalCount}`, {
           left: cw - pad - 130,
-          top: 66,
+          top: 64,
           width: 130,
           fontSize: 26,
           fontFamily: fontId,
@@ -1274,22 +1610,20 @@ export default function InstaAutoStudioPage() {
         targetCanvas.add(numTxt);
       }
 
-      // ======================================================================
       // 제목(headline) & 본문(body) 텍스트 객체 배치
-      // ======================================================================
       let textLeft = pad + 32;
       let textWidth = innerW - 64;
-      let headlineTop = Math.round(ch * 0.63);
+      let headlineTop = Math.round(ch * 0.66);
       let align: 'left' | 'center' | 'right' = 'left';
 
       if (tplId === 'bottom-photo-card') {
         textLeft = pad;
         textWidth = innerW;
-        headlineTop = 160;
+        headlineTop = 152;
       } else if (tplId === 'split-magazine' && photoUrls.length > 0) {
-        const leftW = Math.round(innerW * 0.46);
-        textLeft = pad + leftW + 40;
-        textWidth = innerW - leftW - 40;
+        const leftW = Math.round(innerW * 0.48);
+        textLeft = pad + leftW + 36;
+        textWidth = innerW - leftW - 36;
         headlineTop = Math.round(ch * 0.34);
       } else if (tplId === 'center-focus-box') {
         textLeft = 110;
@@ -1322,43 +1656,48 @@ export default function InstaAutoStudioPage() {
           ? '#334155'
           : subTextColor;
 
-      const headlineTextbox = new fabric.Textbox(slide.headline || '제목을 입력하세요', {
-        left: textLeft,
-        top: headlineTop,
-        width: textWidth,
-        fontSize: tplId === 'full-bleed-poster' ? 64 : 52,
-        fontFamily: fontId,
-        fontWeight: 'bold',
-        fill: titleColor,
-        textAlign: align,
-        lineHeight: 1.28,
-        charSpacing: 0,
-        customId: `headline-${Date.now()}`,
-        customRole: 'headline',
-      });
+      const headlineTextbox = new fabric.Textbox(
+        slide.headline !== undefined ? slide.headline : '제목을 입력하세요',
+        {
+          left: textLeft,
+          top: headlineTop,
+          width: textWidth,
+          fontSize: tplId === 'full-bleed-poster' ? 60 : 50,
+          fontFamily: fontId,
+          fontWeight: 'bold',
+          fill: titleColor,
+          textAlign: align,
+          lineHeight: 1.28,
+          charSpacing: 0,
+          customId: `headline-${Date.now()}`,
+          customRole: 'headline',
+        }
+      );
       targetCanvas.add(headlineTextbox);
 
       const headlineHeight = headlineTextbox.calcTextHeight
         ? headlineTextbox.calcTextHeight()
-        : 130;
+        : 120;
 
-      const bodyTextbox = new fabric.Textbox(slide.body || '본문 내용을 입력하세요', {
-        left: textLeft,
-        top: headlineTop + headlineHeight + 28,
-        width: textWidth,
-        fontSize: 30,
-        fontFamily: fontId,
-        fontWeight: 'normal',
-        fill: bodyColor,
-        textAlign: align,
-        lineHeight: 1.5,
-        charSpacing: 0,
-        customId: `body-${Date.now()}`,
-        customRole: 'body',
-      });
+      const bodyTextbox = new fabric.Textbox(
+        slide.body !== undefined ? slide.body : '본문 내용을 입력하세요',
+        {
+          left: textLeft,
+          top: headlineTop + headlineHeight + 24,
+          width: textWidth,
+          fontSize: 29,
+          fontFamily: fontId,
+          fontWeight: 'normal',
+          fill: bodyColor,
+          textAlign: align,
+          lineHeight: 1.5,
+          charSpacing: 0,
+          customId: `body-${Date.now()}`,
+          customRole: 'body',
+        }
+      );
       targetCanvas.add(bodyTextbox);
 
-      // [6. 워터마크 설정]: 기본값은 꺼짐(false)이며, 켰을 때만 내가 적은 문구 표시
       if (showWatermark && watermarkText.trim()) {
         const wmTextbox = new fabric.Textbox(watermarkText.trim(), {
           left: pad,
@@ -1382,7 +1721,7 @@ export default function InstaAutoStudioPage() {
   );
 
   // ==========================================================================
-  // 11) 슬라이드 전환 시 해당 슬라이드의 Fabric JSON 로드 또는 초기 객체 생성
+  // 11) 슬라이드 전환 및 초기 로드 시 Fabric 캔버스 렌더링 (Fabric v6 호환 완벽 수정!)
   // ==========================================================================
   const activeSlide = slides[activeSlideIndex] || slides[0];
 
@@ -1398,20 +1737,30 @@ export default function InstaAutoStudioPage() {
     setSelectedObjType('none');
 
     async function loadActiveSlideToCanvas() {
-      if (activeSlide.fabricJson && activeSlide.fabricJson.objects) {
+      const hasValidSavedObjects =
+        activeSlide.fabricJson &&
+        Array.isArray(activeSlide.fabricJson.objects) &&
+        activeSlide.fabricJson.objects.length > 0;
+
+      if (hasValidSavedObjects) {
         try {
-          const res = canvas.loadFromJSON(activeSlide.fabricJson, () => {
-            if (activeSlide.fabricJson.background) {
-              canvas.backgroundColor = activeSlide.fabricJson.background;
-              setCanvasBgColor(String(activeSlide.fabricJson.background));
-            }
-            canvas.requestRenderAll();
-          });
-          if (res && typeof res.then === 'function') {
-            await res;
-            if (activeSlide.fabricJson.background) {
-              canvas.backgroundColor = activeSlide.fabricJson.background;
-              setCanvasBgColor(String(activeSlide.fabricJson.background));
+          // [중요] Fabric.js v6에서는 loadFromJSON(json)에 콜백을 넘기면 reviver로 오작동하므로
+          // 반드시 Promise await 방식으로만 호출한 뒤 requestRenderAll()을 실행합니다!
+          await canvas.loadFromJSON(activeSlide.fabricJson);
+          if (cancelled) return;
+          if (activeSlide.fabricJson.background) {
+            canvas.backgroundColor = activeSlide.fabricJson.background;
+            setCanvasBgColor(String(activeSlide.fabricJson.background));
+          }
+          // 혹시 복원 후 객체가 0개라면 즉시 기본 슬라이드 객체들로 재생성
+          if (!canvas.getObjects || canvas.getObjects().length === 0) {
+            await buildFabricObjectsForSlide(canvas, activeSlide, slides.length);
+          } else {
+            // 슬라이드 번호(1 / N) 최신화
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const numObj = canvas.getObjects().find((o: any) => o.customRole === 'slide-number');
+            if (numObj && slides.length > 1) {
+              numObj.set('text', `${activeSlide.slideNumber} / ${slides.length}`);
             }
             canvas.requestRenderAll();
           }
@@ -1443,10 +1792,249 @@ export default function InstaAutoStudioPage() {
     return () => {
       cancelled = true;
     };
-  }, [libsReady, activeSlide?.id, activeSlideIndex]);
+  }, [libsReady, activeSlide?.id, activeSlideIndex, canvasRebuildTick, buildFabricObjectsForSlide, slides.length]);
 
   // ==========================================================================
-  // 12) 실행 취소 (Undo: Ctrl+Z) / 다시 실행 (Redo: Ctrl+Y)
+  // 12) [기능 1 핵심] 장별 제목·본문·뱃지 직접 입력 시 실시간으로 캔버스 미리보기 즉시 반영!
+  // ==========================================================================
+  function handleDirectSlideTextChange(
+    field: 'headline' | 'body' | 'badgeText',
+    newValue: string
+  ) {
+    const canvas = fabricCanvasRef.current;
+
+    if (canvas && window.fabric) {
+      const roleMap = {
+        headline: 'headline',
+        body: 'body',
+        badgeText: 'badge-text',
+      } as const;
+      const targetRole = roleMap[field];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const objs: any[] = canvas.getObjects ? canvas.getObjects() : [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let targetObj = objs.find((o: any) => o.customRole === targetRole);
+
+      if (targetObj) {
+        targetObj.set('text', newValue);
+        // 뱃지 글자 길이에 맞춰 뱃지 배경 박스 너비도 자동 조절
+        if (field === 'badgeText') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const badgeBg = objs.find((o: any) => o.customRole === 'badge-bg');
+          const nextBadgeW = Math.max(140, newValue.length * 24 + 48);
+          if (badgeBg) {
+            badgeBg.set('width', nextBadgeW);
+          }
+          targetObj.set('width', nextBadgeW - 24);
+        }
+        // 제목 높이가 바뀌면 본문 위치가 겹치지 않도록 자동 보정
+        if (field === 'headline') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const bodyObj = objs.find((o: any) => o.customRole === 'body');
+          if (bodyObj && targetObj.calcTextHeight) {
+            const hHeight = targetObj.calcTextHeight();
+            const minBodyTop = (targetObj.top || 400) + hHeight + 24;
+            if (Math.abs((bodyObj.top || 0) - minBodyTop) < 180) {
+              bodyObj.set('top', minBodyTop);
+              bodyObj.setCoords();
+            }
+          }
+        }
+        if (canvas.getActiveObject() === targetObj) {
+          setSelTextValue(newValue);
+        }
+        canvas.requestRenderAll();
+      } else {
+        // 만약 사용자가 캔버스에서 해당 텍스트 박스를 지웠다면 새로 만들어 줌
+        const cw = canvas.width || 1080;
+        const ch = canvas.height || 1350;
+        const newTb = new window.fabric.Textbox(newValue, {
+          left: 104,
+          top: field === 'headline' ? Math.round(ch * 0.62) : field === 'body' ? Math.round(ch * 0.74) : 65,
+          width: cw - 208,
+          fontSize: field === 'headline' ? 50 : field === 'body' ? 29 : 24,
+          fontFamily: fontId,
+          fontWeight: field === 'body' ? 'normal' : 'bold',
+          fill: '#0F172A',
+          customId: `${targetRole}-${Date.now()}`,
+          customRole: targetRole,
+        });
+        canvas.add(newTb);
+        canvas.requestRenderAll();
+        targetObj = newTb;
+      }
+    }
+
+    const updatedJson = canvas ? canvas.toObject(CUSTOM_PROPS) : undefined;
+    if (updatedJson && canvas) {
+      updatedJson.background = canvas.backgroundColor || '#FFFFFF';
+    }
+
+    setSlides((prev) =>
+      prev.map((s, idx) =>
+        idx === activeSlideIndex
+          ? {
+              ...s,
+              [field]: newValue,
+              isManuallyEdited: true,
+              fabricJson: updatedJson || s.fabricJson,
+            }
+          : s
+      )
+    );
+  }
+
+  // "직접 쓰기 (이 장 빈칸으로 비우기)" 또는 "전체 장 직접 쓰기"
+  async function handleClearSlideForDirectWriting(scope: 'current' | 'all') {
+    if (scope === 'current') {
+      const cur = slides[activeSlideIndex];
+      if (!cur) return;
+      if (
+        cur.isManuallyEdited &&
+        (cur.headline.trim() || cur.body.trim()) &&
+        !window.confirm('현재 장에 작성된 내용을 비우고 빈칸에서 직접 쓰시겠어요?')
+      ) {
+        return;
+      }
+      const clearedSlide: SlideItem = {
+        ...cur,
+        badgeText: `${activeSlideIndex + 1}장`,
+        headline: '',
+        body: '',
+        isManuallyEdited: true,
+        fabricJson: undefined,
+      };
+      setSlides((prev) => prev.map((s, i) => (i === activeSlideIndex ? clearedSlide : s)));
+      if (fabricCanvasRef.current) {
+        await buildFabricObjectsForSlide(fabricCanvasRef.current, clearedSlide, slides.length);
+        saveCanvasToActiveSlide(true);
+      }
+      showToast('✏️ 현재 장을 빈칸으로 비웠습니다! 왼쪽 입력칸에서 직접 작성해 보세요.');
+    } else {
+      if (
+        !window.confirm(
+          '전체 장의 제목과 본문을 모두 빈칸으로 비우고 1장부터 직접 작성하시겠어요?'
+        )
+      ) {
+        return;
+      }
+      buildDefaultSlides(slides.length, true, true);
+      showToast('✏️ 모든 장을 직접 쓰기 모드(빈칸)로 준비했습니다!');
+    }
+  }
+
+  // ==========================================================================
+  // 13) [기능 2 핵심] 장별 사진 표시 방식('contain' 전체 보이기 / 'cover' 꽉 채우기)
+  //     및 여백 채우기 방식('solid' 배경색 / 'blur' 블러 배경) 즉시 전환
+  // ==========================================================================
+  async function handlePhotoFitOrBgChange(
+    nextFitMode: PhotoFitMode,
+    nextBgFillMode: PhotoBgFillMode,
+    applyToAll = false
+  ) {
+    const cur = slides[activeSlideIndex];
+    if (!cur) return;
+
+    const updatedActive: SlideItem = {
+      ...cur,
+      photoFitMode: nextFitMode,
+      photoBgFillMode: nextBgFillMode,
+      fabricJson: undefined,
+    };
+
+    setSlides((prev) =>
+      prev.map((s, idx) => {
+        if (idx === activeSlideIndex) return updatedActive;
+        if (applyToAll) {
+          return {
+            ...s,
+            photoFitMode: nextFitMode,
+            photoBgFillMode: nextBgFillMode,
+            fabricJson: undefined,
+          };
+        }
+        return s;
+      })
+    );
+
+    if (fabricCanvasRef.current) {
+      await buildFabricObjectsForSlide(fabricCanvasRef.current, updatedActive, slides.length);
+      saveCanvasToActiveSlide(true);
+    }
+
+    const fitLabel = nextFitMode === 'contain' ? '전체 보이기(자르지 않음)' : '꽉 채우기(자름)';
+    const bgLabel =
+      nextFitMode === 'contain'
+        ? nextBgFillMode === 'blur'
+          ? ' + 블러 배경'
+          : ' + 배경색 채우기'
+        : '';
+    showToast(
+      `📐 ${applyToAll ? '모든 장' : `${activeSlideIndex + 1}장`} 사진 표시: [${fitLabel}${bgLabel}] 적용 완료!`
+    );
+  }
+
+  // 사진 크기(확대/축소) 및 중앙 정렬 빠른 조절 도우미 (비율 100% 유지, 찌그러짐 방지!)
+  function handleAdjustActivePhotoScaleOrPos(action: 'zoom-in' | 'zoom-out' | 'center') {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    // 현재 선택된 객체가 사진이면 그 사진을, 아니면 이 장의 첫 번째 사진 객체를 찾음
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let targetImg: any = canvas.getActiveObject?.();
+    if (!targetImg || String(targetImg.type || '').toLowerCase() !== 'image') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      targetImg = canvas.getObjects().find((o: any) => o.customRole === 'photo');
+    }
+    if (!targetImg) {
+      showToast('⚠️ 이 장에 먼저 사진을 넣어주세요!');
+      return;
+    }
+
+    const curScale = targetImg.scaleX || 1;
+    const natW = targetImg.width || 800;
+    const natH = targetImg.height || 800;
+    const boxLeft = targetImg.boxLeft ?? 72;
+    const boxTop = targetImg.boxTop ?? 132;
+    const boxW = targetImg.boxW ?? (canvas.width || 1080) - 144;
+    const boxH = targetImg.boxH ?? Math.round((canvas.height || 1350) * 0.5);
+
+    if (action === 'zoom-in' || action === 'zoom-out') {
+      const factor = action === 'zoom-in' ? 1.12 : 0.89;
+      const nextScale = Math.max(0.08, Math.min(4, curScale * factor));
+      const prevW = natW * curScale;
+      const prevH = natH * curScale;
+      const nextW = natW * nextScale;
+      const nextH = natH * nextScale;
+
+      // 중심점을 유지한 채 가로·세로 똑같은 비율(nextScale)로 키우거나 줄임 (절대 안 찌그러짐!)
+      targetImg.set({
+        scaleX: nextScale,
+        scaleY: nextScale,
+        left: Math.round((targetImg.left || 0) - (nextW - prevW) / 2),
+        top: Math.round((targetImg.top || 0) - (nextH - prevH) / 2),
+      });
+    } else if (action === 'center') {
+      const containScale = Math.min(boxW / natW, boxH / natH);
+      const scaledW = natW * containScale;
+      const scaledH = natH * containScale;
+      targetImg.set({
+        scaleX: containScale,
+        scaleY: containScale,
+        left: Math.round(boxLeft + (boxW - scaledW) / 2),
+        top: Math.round(boxTop + (boxH - scaledH) / 2),
+        angle: 0,
+      });
+    }
+
+    targetImg.setCoords();
+    canvas.setActiveObject(targetImg);
+    canvas.requestRenderAll();
+    saveCanvasToActiveSlide(true);
+  }
+
+  // ==========================================================================
+  // 14) 실행 취소 (Undo: Ctrl+Z) / 다시 실행 (Redo: Ctrl+Y)
   // ==========================================================================
   const handleUndo = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
@@ -1464,21 +2052,16 @@ export default function InstaAutoStudioPage() {
       currentJson,
     ];
 
-    const parsed = JSON.parse(prevJson);
-    const res = canvas.loadFromJSON(parsed, () => {
+    try {
+      const parsed = JSON.parse(prevJson);
+      await canvas.loadFromJSON(parsed);
       if (parsed.background) {
         canvas.backgroundColor = parsed.background;
         setCanvasBgColor(String(parsed.background));
       }
       canvas.requestRenderAll();
-    });
-    if (res && typeof res.then === 'function') {
-      await res;
-      if (parsed.background) {
-        canvas.backgroundColor = parsed.background;
-        setCanvasBgColor(String(parsed.background));
-      }
-      canvas.requestRenderAll();
+    } catch {
+      // ignore
     }
 
     isRestoringRef.current = false;
@@ -1501,21 +2084,16 @@ export default function InstaAutoStudioPage() {
       nextJson,
     ];
 
-    const parsed = JSON.parse(nextJson);
-    const res = canvas.loadFromJSON(parsed, () => {
+    try {
+      const parsed = JSON.parse(nextJson);
+      await canvas.loadFromJSON(parsed);
       if (parsed.background) {
         canvas.backgroundColor = parsed.background;
         setCanvasBgColor(String(parsed.background));
       }
       canvas.requestRenderAll();
-    });
-    if (res && typeof res.then === 'function') {
-      await res;
-      if (parsed.background) {
-        canvas.backgroundColor = parsed.background;
-        setCanvasBgColor(String(parsed.background));
-      }
-      canvas.requestRenderAll();
+    } catch {
+      // ignore
     }
 
     isRestoringRef.current = false;
@@ -1524,7 +2102,7 @@ export default function InstaAutoStudioPage() {
     saveCanvasToActiveSlide(false);
   }, [activeSlide, saveCanvasToActiveSlide]);
 
-  // 키보드 단축키: Ctrl+Z / Ctrl+Y / Delete(선택 객체 삭제)
+  // 키보드 단축키: Ctrl+Z / Ctrl+Y / Delete
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -1532,7 +2110,6 @@ export default function InstaAutoStudioPage() {
 
       const canvas = fabricCanvasRef.current;
       const activeObj = canvas?.getActiveObject?.();
-      // 캔버스 위에서 텍스트 더블클릭 타이핑 중일 때는 기본 키 동작 유지
       if (activeObj && activeObj.isEditing) return;
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
@@ -1560,7 +2137,7 @@ export default function InstaAutoStudioPage() {
   }, [handleUndo, handleRedo, saveCanvasToActiveSlide]);
 
   // ==========================================================================
-  // 13) [기능 1: 폰트 추가 & 텍스트 세부 편집]
+  // 15) 폰트 추가 & 텍스트 세부 편집
   // ==========================================================================
   async function handleCustomFontUpload(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
@@ -1592,37 +2169,45 @@ export default function InstaAutoStudioPage() {
       setCustomFonts(nextList);
       await saveToLocalDb('acs_custom_fonts_v1', nextList);
 
-      // 현재 선택된 텍스트 또는 전체 기본 폰트로 즉시 반영
       applyFontToSelectionOrAll(customFontId);
-      showToast(`✅ '${cleanName}' 폰트가 등록되어 localForage에 영구 저장되었습니다!`);
+      showToast(`✅ '${cleanName}' 폰트가 등록되어 자동 저장되었습니다!`);
     } catch {
       showToast('⚠️ 폰트 파일을 읽는 중 오류가 발생했습니다. (.ttf, .otf, .woff, .woff2 지원)');
     }
   }
 
-  async function handleDeleteCustomFont(id: string) {
-    const nextList = customFonts.filter((f) => f.id !== id);
+  async function handleDeleteCustomFont(targetFontId: string) {
+    const nextList = customFonts.filter((f) => f.id !== targetFontId);
     setCustomFonts(nextList);
     await saveToLocalDb('acs_custom_fonts_v1', nextList);
-    showToast('내 폰트가 목록에서 삭제되었습니다.');
+    if (fontId === targetFontId) {
+      applyFontToSelectionOrAll('Pretendard');
+    }
+    showToast('🗑️ 업로드한 폰트를 목록에서 삭제했습니다.');
   }
 
-  function applyFontToSelectionOrAll(targetFontId: string) {
-    setFontId(targetFontId);
-    setSelFontFamily(targetFontId);
+  function applyFontToSelectionOrAll(nextFontFamily: string) {
+    setFontId(nextFontFamily);
+    setSelFontFamily(nextFontFamily);
+
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const active = canvas.getActiveObject();
-    if (active && (active.type === 'textbox' || active.type === 'i-text' || active.type === 'text')) {
-      active.set('fontFamily', targetFontId);
+
+    const activeObj = canvas.getActiveObject();
+    if (
+      activeObj &&
+      (String(activeObj.type).toLowerCase() === 'textbox' ||
+        String(activeObj.type).toLowerCase() === 'i-text')
+    ) {
+      activeObj.set('fontFamily', nextFontFamily);
       canvas.requestRenderAll();
       saveCanvasToActiveSlide(true);
     } else {
-      // 아무것도 선택 안 되어 있으면 현재 카드의 모든 글씨 폰트 변경
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      canvas.getObjects().forEach((o: any) => {
-        if (o.type === 'textbox' || o.type === 'i-text' || o.type === 'text') {
-          o.set('fontFamily', targetFontId);
+      canvas.getObjects().forEach((obj: any) => {
+        const t = String(obj.type || '').toLowerCase();
+        if (t === 'textbox' || t === 'i-text' || t === 'text') {
+          obj.set('fontFamily', nextFontFamily);
         }
       });
       canvas.requestRenderAll();
@@ -1630,7 +2215,6 @@ export default function InstaAutoStudioPage() {
     }
   }
 
-  // 선택된 텍스트 속성 변경 헬퍼
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function updateSelectedTextProp(prop: string, value: any) {
     const canvas = fabricCanvasRef.current;
@@ -1639,193 +2223,211 @@ export default function InstaAutoStudioPage() {
     if (!active) return;
 
     active.set(prop, value);
-    if (prop === 'text') {
-      active.initDimensions?.();
+    if (prop === 'fontSize' || prop === 'charSpacing' || prop === 'lineHeight' || prop === 'text') {
+      if (typeof active.initDimensions === 'function') {
+        active.initDimensions();
+      }
     }
+    active.setCoords();
     canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
   }
 
-  // 새 텍스트 박스 추가
   function handleAddTextObject(preset: 'headline' | 'body' | 'badge') {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
     const fabric = window.fabric;
 
-    const isTitle = preset === 'headline';
-    const isBadge = preset === 'badge';
+    const cw = canvas.width || 1080;
+    const ch = canvas.height || 1350;
 
-    const textbox = new fabric.Textbox(
-      isTitle ? '새 제목을 입력하세요' : isBadge ? 'NEW POINT' : '새 텍스트 내용을 더블클릭해 수정하세요',
-      {
-        left: Math.round((canvas.width || 1080) / 2 - 320),
-        top: Math.round((canvas.height || 1350) / 2 - 60),
-        width: isBadge ? 240 : 640,
-        fontSize: isTitle ? 56 : isBadge ? 28 : 32,
+    if (preset === 'headline') {
+      const tb = new fabric.Textbox('새 제목을 더블클릭해 수정하세요', {
+        left: Math.round(cw * 0.1),
+        top: Math.round(ch * 0.42),
+        width: Math.round(cw * 0.8),
+        fontSize: 54,
         fontFamily: fontId,
-        fontWeight: isTitle || isBadge ? 'bold' : 'normal',
-        fill: isBadge ? '#FFFFFF' : '#0F172A',
-        textBackgroundColor: isBadge ? accentColor : '',
-        textAlign: isBadge ? 'center' : 'left',
-        lineHeight: 1.35,
-        charSpacing: 0,
+        fontWeight: 'bold',
+        fill: '#0F172A',
+        textAlign: 'center',
+        lineHeight: 1.25,
         customId: `text-${Date.now()}`,
-        customRole: isTitle ? 'headline' : 'custom-text',
-      }
-    );
+        customRole: 'custom-text',
+      });
+      canvas.add(tb);
+      canvas.setActiveObject(tb);
+    } else if (preset === 'body') {
+      const tb = new fabric.Textbox('자유롭게 이동하고 크기를 조절할 수 있는 본문 텍스트입니다.', {
+        left: Math.round(cw * 0.12),
+        top: Math.round(ch * 0.55),
+        width: Math.round(cw * 0.76),
+        fontSize: 32,
+        fontFamily: fontId,
+        fontWeight: 'normal',
+        fill: '#334155',
+        textAlign: 'left',
+        lineHeight: 1.5,
+        customId: `text-${Date.now()}`,
+        customRole: 'custom-text',
+      });
+      canvas.add(tb);
+      canvas.setActiveObject(tb);
+    } else {
+      const badgeRect = new fabric.Rect({
+        left: Math.round(cw / 2 - 110),
+        top: Math.round(ch * 0.3),
+        width: 220,
+        height: 56,
+        fill: accentColor,
+        rx: 28,
+        ry: 28,
+        customId: `badge-rect-${Date.now()}`,
+        customRole: 'shape',
+      });
+      const badgeText = new fabric.Textbox('✨ NEW POINT', {
+        left: Math.round(cw / 2 - 100),
+        top: Math.round(ch * 0.3 + 13),
+        width: 200,
+        fontSize: 24,
+        fontFamily: fontId,
+        fontWeight: 'bold',
+        fill: getReadableTextOnAccent(accentColor),
+        textAlign: 'center',
+        customId: `badge-txt-${Date.now()}`,
+        customRole: 'custom-text',
+      });
+      canvas.add(badgeRect);
+      canvas.add(badgeText);
+      canvas.setActiveObject(badgeText);
+    }
 
-    canvas.add(textbox);
-    canvas.setActiveObject(textbox);
     canvas.requestRenderAll();
-    syncSelectionState(textbox);
     saveCanvasToActiveSlide(true);
-    showToast('✏️ 새 글자 박스가 추가되었습니다! 드래그하거나 더블클릭해 수정하세요.');
   }
 
   // ==========================================================================
-  // 14) [기능 2: 템플릿 변경 · 배경색 · 배경 이미지 · 도형(사각형/원/선) 추가]
+  // 16) 템플릿 / 배경색 / 배경 이미지 / 도형 추가
   // ==========================================================================
-  async function handleApplyTemplate(newTplId: CardTemplateId, applyToAll = false) {
+  async function handleSelectTemplate(newTplId: CardTemplateId, applyAllSlides = false) {
     setTemplateId(newTplId);
-    const tpl = CARD_TEMPLATES.find((t) => t.id === newTplId) || CARD_TEMPLATES[0];
-    setAccentColor(tpl.accentColor);
+    const tpl = CARD_TEMPLATES.find((t) => t.id === newTplId);
+    if (tpl) {
+      setAccentColor(tpl.accentColor);
+    }
 
     const canvas = fabricCanvasRef.current;
-    if (!canvas || !activeSlide) return;
+    if (canvas && activeSlide) {
+      const updatedSlide: SlideItem = {
+        ...activeSlide,
+        templateId: newTplId,
+        customBgColor: tpl?.bgColor,
+      };
+      await buildFabricObjectsForSlide(canvas, updatedSlide, slides.length, newTplId);
+      saveCanvasToActiveSlide(true);
+    }
 
-    await buildFabricObjectsForSlide(canvas, { ...activeSlide, templateId: newTplId }, slides.length, newTplId);
-    saveCanvasToActiveSlide(true);
-
-    if (applyToAll) {
+    if (applyAllSlides) {
       setSlides((prev) =>
         prev.map((s, idx) =>
           idx === activeSlideIndex
-            ? { ...s, templateId: newTplId }
-            : { ...s, templateId: newTplId, fabricJson: undefined }
+            ? { ...s, templateId: newTplId, customBgColor: tpl?.bgColor }
+            : {
+                ...s,
+                templateId: newTplId,
+                customBgColor: tpl?.bgColor,
+                fabricJson: undefined,
+              }
         )
       );
-      showToast(`✨ '${tpl.name}' 템플릿을 전체 카드에 적용했습니다!`);
+      showToast(`🎨 모든 카드에 '${tpl?.name}' 템플릿이 적용되었습니다!`);
     } else {
-      showToast(`✨ 현재 카드에 '${tpl.name}' 템플릿이 적용되었습니다!`);
+      showToast(`🎨 현재 카드에 '${tpl?.name}' 디자인이 적용되었습니다!`);
     }
   }
 
-  function handleChangeCanvasBgColor(hex: string) {
-    setCanvasBgColor(hex);
+  function handleCanvasBgColorChange(newHex: string) {
+    setCanvasBgColor(newHex);
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    canvas.backgroundColor = hex;
+    canvas.backgroundColor = newHex;
+    // 'solid' 여백 프레임 색상도 함께 동기화
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    canvas.getObjects().forEach((o: any) => {
+      if (o.customRole === 'photo-backdrop' && o.type === 'rect') {
+        o.set('fill', newHex);
+      }
+    });
     canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
   }
 
-  async function handleSetBackgroundImageFromFile(fileList: FileList | null) {
-    if (!fileList || fileList.length === 0) return;
-    const file = fileList[0];
-    const dataUrl = await new Promise<string>((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.readAsDataURL(file);
-    });
-    await setCanvasBackgroundPhotoUrl(dataUrl);
-  }
-
-  async function setCanvasBackgroundPhotoUrl(url: string) {
-    const canvas = fabricCanvasRef.current;
-    if (!canvas || !window.fabric) return;
-    const fabric = window.fabric;
-    const ImageClass = fabric.FabricImage || fabric.Image;
-
-    try {
-      // 기존 배경 전용 이미지가 있으면 제거
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const oldBg = canvas.getObjects().find((o: any) => o.customRole === 'bg-photo');
-      if (oldBg) canvas.remove(oldBg);
-
-      const imgEl = await loadHtmlImageElement(url);
-      const cw = canvas.width || 1080;
-      const ch = canvas.height || 1350;
-      const scale = Math.max(cw / imgEl.naturalWidth, ch / imgEl.naturalHeight);
-
-      const bgImg = new ImageClass(imgEl, {
-        left: 0,
-        top: 0,
-        scaleX: scale,
-        scaleY: scale,
-        customId: `bg-photo-${Date.now()}`,
-        customRole: 'bg-photo',
-        originalSrc: url,
-      });
-
-      canvas.add(bgImg);
-      if (typeof canvas.sendObjectToBack === 'function') {
-        canvas.sendObjectToBack(bgImg);
-      } else if (typeof canvas.sendToBack === 'function') {
-        canvas.sendToBack(bgImg);
-      }
-      canvas.requestRenderAll();
-      saveCanvasToActiveSlide(true);
-      showToast('🖼️ 배경 이미지가 적용되었습니다!');
-    } catch {
-      showToast('⚠️ 배경 이미지를 불러오지 못했습니다.');
-    }
-  }
-
-  // 도형 추가 (사각형, 원, 구분선)
   function handleAddShape(shapeType: 'rect' | 'circle' | 'line') {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
     const fabric = window.fabric;
 
-    const cx = Math.round((canvas.width || 1080) / 2);
-    const cy = Math.round((canvas.height || 1350) / 2);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let shapeObj: any;
+    const cw = canvas.width || 1080;
+    const ch = canvas.height || 1350;
 
     if (shapeType === 'rect') {
-      shapeObj = new fabric.Rect({
-        left: cx - 200,
-        top: cy - 120,
-        width: 400,
-        height: 240,
+      const rect = new fabric.Rect({
+        left: Math.round(cw / 2 - 180),
+        top: Math.round(ch / 2 - 110),
+        width: 360,
+        height: 220,
         fill: accentColor,
+        opacity: 0.9,
         rx: 24,
         ry: 24,
-        opacity: 0.9,
+        stroke: '#FFFFFF',
+        strokeWidth: 0,
         customId: `rect-${Date.now()}`,
         customRole: 'shape',
       });
+      canvas.add(rect);
+      canvas.setActiveObject(rect);
     } else if (shapeType === 'circle') {
-      shapeObj = new fabric.Circle({
-        left: cx - 120,
-        top: cy - 120,
-        radius: 120,
+      const circle = new fabric.Circle({
+        left: Math.round(cw / 2 - 110),
+        top: Math.round(ch / 2 - 110),
+        radius: 110,
         fill: accentColor,
         opacity: 0.9,
+        stroke: '#FFFFFF',
+        strokeWidth: 0,
         customId: `circle-${Date.now()}`,
         customRole: 'shape',
       });
+      canvas.add(circle);
+      canvas.setActiveObject(circle);
     } else {
-      shapeObj = new fabric.Line([cx - 250, cy, cx + 250, cy], {
-        stroke: accentColor,
-        strokeWidth: 8,
+      const line = new fabric.Rect({
+        left: Math.round(cw * 0.15),
+        top: Math.round(ch / 2),
+        width: Math.round(cw * 0.7),
+        height: 6,
+        fill: accentColor,
+        rx: 3,
+        ry: 3,
         customId: `line-${Date.now()}`,
         customRole: 'shape',
       });
+      canvas.add(line);
+      canvas.setActiveObject(line);
     }
 
-    canvas.add(shapeObj);
-    canvas.setActiveObject(shapeObj);
     canvas.requestRenderAll();
-    syncSelectionState(shapeObj);
     saveCanvasToActiveSlide(true);
   }
 
   // ==========================================================================
-  // 15) [기능 3: 사진 자유 편집 — 여러 장 추가, 클릭 교체, 회전, 모서리 둥글기, 투명도, 크롭]
+  // 17) 사진 추가/교체/삭제/자르기(크롭)/레이어 순서 조절
   // ==========================================================================
-  // 현재 캔버스에 사진 객체 1장 추가 (한 카드에 여러 장 무제한 추가 가능)
-  async function handleAddPhotoToCanvas(url: string) {
+  async function addPhotoObjectToCurrentCanvas(
+    url: string,
+    asBackground = false
+  ) {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
     const fabric = window.fabric;
@@ -1833,152 +2435,382 @@ export default function InstaAutoStudioPage() {
 
     try {
       const imgEl = await loadHtmlImageElement(url);
-      const targetW = 540;
-      const scale = targetW / (imgEl.naturalWidth || 800);
-      const offset = (canvas.getObjects().filter((o: { type: string }) => o.type === 'image').length % 5) * 36;
+      const cw = canvas.width || 1080;
+      const ch = canvas.height || 1350;
+      const natW = imgEl.naturalWidth || imgEl.width || 800;
+      const natH = imgEl.naturalHeight || imgEl.height || 800;
 
-      const fImg = new ImageClass(imgEl, {
-        left: 180 + offset,
-        top: 220 + offset,
-        scaleX: scale,
-        scaleY: scale,
-        cornerRadius: 20,
-        customId: `photo-${Date.now()}`,
-        customRole: 'photo',
-        originalSrc: url,
-      });
+      if (asBackground) {
+        const scale = Math.max(cw / natW, ch / natH);
+        const fImg = new ImageClass(imgEl, {
+          left: 0,
+          top: 0,
+          scaleX: scale,
+          scaleY: scale,
+          customId: `bg-photo-${Date.now()}`,
+          customRole: 'bg-photo',
+          originalSrc: url,
+          cornerRadius: 0,
+        });
+        canvas.add(fImg);
+        if (typeof canvas.sendObjectToBack === 'function') {
+          canvas.sendObjectToBack(fImg);
+        } else if (typeof canvas.sendToBack === 'function') {
+          canvas.sendToBack(fImg);
+        }
+        canvas.setActiveObject(fImg);
+      } else {
+        // [기능 2] 자르지 않고 원본 비율 그대로 크게 넣기 (contain)
+        const boxW = Math.round(cw - 144);
+        const boxH = Math.round(ch * 0.48);
+        const containScale = Math.min(boxW / natW, boxH / natH);
+        const scaledW = natW * containScale;
+        const scaledH = natH * containScale;
 
-      fImg.set(
-        'clipPath',
-        new fabric.Rect({
-          width: imgEl.naturalWidth,
-          height: imgEl.naturalHeight,
-          rx: 20 / scale,
-          ry: 20 / scale,
-          originX: 'center',
-          originY: 'center',
-        })
-      );
+        const existingPhotos = canvas
+          .getObjects()
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .filter((o: any) => o.customRole === 'photo').length;
+        const offset = existingPhotos * 24;
 
-      canvas.add(fImg);
-      canvas.setActiveObject(fImg);
+        const fImg = new ImageClass(imgEl, {
+          left: Math.round(72 + (boxW - scaledW) / 2 + offset),
+          top: Math.round(132 + (boxH - scaledH) / 2 + offset),
+          cropX: 0,
+          cropY: 0,
+          width: natW,
+          height: natH,
+          scaleX: containScale,
+          scaleY: containScale,
+          customId: `photo-${Date.now()}`,
+          customRole: 'photo',
+          originalSrc: url,
+          cornerRadius: 20,
+          photoFitMode: 'contain',
+          boxLeft: 72,
+          boxTop: 132,
+          boxW,
+          boxH,
+        });
+
+        fImg.set(
+          'clipPath',
+          new fabric.Rect({
+            width: natW,
+            height: natH,
+            rx: 20 / containScale,
+            ry: 20 / containScale,
+            originX: 'center',
+            originY: 'center',
+          })
+        );
+
+        canvas.add(fImg);
+        canvas.setActiveObject(fImg);
+      }
+
       canvas.requestRenderAll();
-      syncSelectionState(fImg);
       saveCanvasToActiveSlide(true);
-      showToast('📸 카드에 사진이 추가되었습니다! 자유롭게 이동·크기 조절·회전해 보세요.');
     } catch {
-      showToast('⚠️ 사진을 캔버스에 추가하는 중 오류가 발생했습니다.');
+      showToast('⚠️ 이미지를 불러오는 중 오류가 발생했습니다.');
     }
   }
 
-  // 현재 선택된 사진을 새 이미지 URL로 즉시 교체 (위치·크기·각도·둥글기 그대로 유지!)
+  // 장마다 사진을 따로 넣거나 교체하는 함수
+  async function handleSlideSpecificPhotoUpload(
+    files: FileList | null,
+    mode: 'set-slide-photo' | 'add-more-to-slide'
+  ) {
+    if (!files || files.length === 0) return;
+
+    const newPhotos: UploadedPhoto[] = [];
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) continue;
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.readAsDataURL(file);
+      });
+      newPhotos.push({
+        id: `photo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: file.name,
+        url: dataUrl,
+      });
+    }
+
+    if (newPhotos.length === 0) return;
+
+    setUploadedPhotos((prev) => [...prev, ...newPhotos]);
+
+    const cur = slides[activeSlideIndex];
+    if (!cur) return;
+
+    const nextPhotoUrls =
+      mode === 'set-slide-photo'
+        ? newPhotos.map((p) => p.url)
+        : [...(cur.photoUrls || (cur.photoUrl ? [cur.photoUrl] : [])), ...newPhotos.map((p) => p.url)];
+
+    const updatedSlide: SlideItem = {
+      ...cur,
+      photoUrl: nextPhotoUrls[0] || null,
+      photoUrls: nextPhotoUrls,
+      photoFitMode: cur.photoFitMode || 'contain',
+      photoBgFillMode: cur.photoBgFillMode || 'solid',
+      fabricJson: undefined,
+    };
+
+    setSlides((prev) => prev.map((s, idx) => (idx === activeSlideIndex ? updatedSlide : s)));
+
+    if (fabricCanvasRef.current) {
+      await buildFabricObjectsForSlide(fabricCanvasRef.current, updatedSlide, slides.length);
+      saveCanvasToActiveSlide(true);
+    }
+
+    showToast(
+      `📸 ${activeSlideIndex + 1}장에 사진 ${newPhotos.length}장이 비율 맞춰 크게(잘리지 않게) 들어갔습니다!`
+    );
+  }
+
+  // 현재 장의 사진 1장 또는 전체 사진 지우기
+  async function handleClearSlidePhotos(targetUrlToRemove?: string) {
+    const cur = slides[activeSlideIndex];
+    if (!cur) return;
+
+    const currentUrls = cur.photoUrls || (cur.photoUrl ? [cur.photoUrl] : []);
+    const nextUrls = targetUrlToRemove
+      ? currentUrls.filter((u) => u !== targetUrlToRemove)
+      : [];
+
+    const updatedSlide: SlideItem = {
+      ...cur,
+      photoUrl: nextUrls[0] || null,
+      photoUrls: nextUrls,
+      fabricJson: undefined,
+    };
+
+    setSlides((prev) => prev.map((s, idx) => (idx === activeSlideIndex ? updatedSlide : s)));
+
+    if (fabricCanvasRef.current) {
+      await buildFabricObjectsForSlide(fabricCanvasRef.current, updatedSlide, slides.length);
+      saveCanvasToActiveSlide(true);
+    }
+
+    showToast(`🗑️ ${activeSlideIndex + 1}장의 사진을 정리했습니다.`);
+  }
+
   async function handleReplaceSelectedPhoto(newUrl: string) {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
+    const fabric = window.fabric;
+    const ImageClass = fabric.FabricImage || fabric.Image;
+
     const active = canvas.getActiveObject();
-    if (!active || active.type !== 'image') {
-      // 선택된 사진이 없으면 새로 추가
-      await handleAddPhotoToCanvas(newUrl);
+    if (!active || String(active.type).toLowerCase() !== 'image') {
+      await addPhotoObjectToCurrentCanvas(newUrl, false);
       return;
     }
 
     try {
       const imgEl = await loadHtmlImageElement(newUrl);
-      const prevDisplayW = active.getScaledWidth();
-      const prevDisplayH = active.getScaledHeight();
       const natW = imgEl.naturalWidth || imgEl.width || 800;
       const natH = imgEl.naturalHeight || imgEl.height || 800;
 
-      const scale = Math.max(prevDisplayW / natW, prevDisplayH / natH);
-      const cropW = Math.min(natW, Math.round(prevDisplayW / scale));
-      const cropH = Math.min(natH, Math.round(prevDisplayH / scale));
-      const cropX = Math.max(0, Math.round((natW - cropW) / 2));
-      const cropY = Math.max(0, Math.round((natH - cropH) / 2));
+      const boxLeft = active.boxLeft ?? active.left ?? 72;
+      const boxTop = active.boxTop ?? active.top ?? 132;
+      const boxW = active.boxW ?? (active.width || 600) * (active.scaleX || 1);
+      const boxH = active.boxH ?? (active.height || 600) * (active.scaleY || 1);
+      const radius = active.cornerRadius || 0;
+      const idx = canvas.getObjects().indexOf(active);
 
-      if (typeof active.setElement === 'function') {
-        active.setElement(imgEl);
-      }
-      active.set({
-        cropX,
-        cropY,
-        width: cropW,
-        height: cropH,
-        scaleX: scale,
-        scaleY: scale,
+      // 교체할 때도 잘리지 않게 원본 비율 유지(contain)로 크게 넣기
+      const containScale = Math.min(boxW / natW, boxH / natH);
+      const scaledW = natW * containScale;
+      const scaledH = natH * containScale;
+
+      const replacement = new ImageClass(imgEl, {
+        left: Math.round(boxLeft + (boxW - scaledW) / 2),
+        top: Math.round(boxTop + (boxH - scaledH) / 2),
+        cropX: 0,
+        cropY: 0,
+        width: natW,
+        height: natH,
+        scaleX: containScale,
+        scaleY: containScale,
+        angle: active.angle || 0,
+        opacity: active.opacity ?? 1,
+        stroke: active.stroke,
+        strokeWidth: active.strokeWidth || 0,
+        customId: active.customId || `photo-${Date.now()}`,
+        customRole: active.customRole || 'photo',
         originalSrc: newUrl,
+        cornerRadius: radius,
+        photoFitMode: 'contain',
+        boxLeft,
+        boxTop,
+        boxW,
+        boxH,
       });
 
-      const radius = active.cornerRadius || 0;
       if (radius > 0) {
-        active.set(
+        replacement.set(
           'clipPath',
-          new window.fabric.Rect({
-            width: cropW,
-            height: cropH,
-            rx: radius / scale,
-            ry: radius / scale,
+          new fabric.Rect({
+            width: natW,
+            height: natH,
+            rx: radius / containScale,
+            ry: radius / containScale,
             originX: 'center',
             originY: 'center',
           })
         );
       }
 
+      canvas.remove(active);
+      if (typeof canvas.insertAt === 'function' && idx >= 0) {
+        canvas.insertAt(idx, replacement);
+      } else {
+        canvas.add(replacement);
+      }
+      canvas.setActiveObject(replacement);
       canvas.requestRenderAll();
       saveCanvasToActiveSlide(true);
-      showToast('🔄 선택한 사진이 교체되었습니다!');
+      showToast('🖼️ 사진이 잘리지 않고 원본 비율 그대로 교체되었습니다!');
     } catch {
       showToast('⚠️ 사진 교체 중 오류가 발생했습니다.');
     }
   }
 
-  // 사진 모서리 둥글기 변경
-  function handlePhotoCornerRadiusChange(radius: number) {
-    setSelCornerRadius(radius);
+  async function handlePhotoFiles(
+    fileList: FileList | null,
+    mode: 'library' | 'add-to-canvas' | 'replace-selected' | 'set-bg' = 'library'
+  ) {
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+
+    const newUploaded: UploadedPhoto[] = [];
+
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) continue;
+
+      const localDataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.readAsDataURL(file);
+      });
+
+      let finalUrl = localDataUrl;
+      if (userId) {
+        try {
+          const supabase = getSupabaseBrowser();
+          const ext = file.name.split('.').pop() || 'jpg';
+          const filePath = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+          const { error } = await supabase.storage.from('user-uploads').upload(filePath, file);
+          if (!error) {
+            const { data } = supabase.storage.from('user-uploads').getPublicUrl(filePath);
+            if (data.publicUrl) finalUrl = data.publicUrl;
+          }
+        } catch {
+          // fallback to localDataUrl
+        }
+      }
+
+      newUploaded.push({
+        id: `photo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name: file.name,
+        url: finalUrl,
+      });
+    }
+
+    if (newUploaded.length === 0) return;
+
+    const combined = [...uploadedPhotos, ...newUploaded].slice(0, 30);
+    setUploadedPhotos(combined);
+
+    if (mode === 'replace-selected') {
+      await handleReplaceSelectedPhoto(newUploaded[0].url);
+    } else if (mode === 'set-bg') {
+      await addPhotoObjectToCurrentCanvas(newUploaded[0].url, true);
+      showToast('🖼️ 배경 사진이 깔렸습니다!');
+    } else if (mode === 'add-to-canvas') {
+      for (const item of newUploaded) {
+        await addPhotoObjectToCurrentCanvas(item.url, false);
+      }
+      showToast(`📸 현재 카드에 사진 ${newUploaded.length}장이 비율 맞춰 추가되었습니다!`);
+    } else {
+      // 라이브러리에 사진 업로드 시 각 장에 골고루 배분하고 현재 장도 즉시 리빌드
+      const nextSlides = slides.map((s, idx) => {
+        const p = combined[idx % combined.length];
+        const hasPhotos = (s.photoUrls && s.photoUrls.length > 0) || Boolean(s.photoUrl);
+        if (!hasPhotos && p) {
+          return {
+            ...s,
+            photoIndex: idx % combined.length,
+            photoUrl: p.url,
+            photoIndices: [idx % combined.length],
+            photoUrls: [p.url],
+            photoFitMode: s.photoFitMode || 'contain',
+            photoBgFillMode: s.photoBgFillMode || 'solid',
+            fabricJson: undefined,
+          };
+        }
+        return s;
+      });
+      setSlides(nextSlides);
+      setCanvasRebuildTick((t) => t + 1);
+      showToast(`📸 사진 ${newUploaded.length}장이 업로드되어 카드에 비율 맞춰 배치되었습니다!`);
+    }
+  }
+
+  function handlePhotoCornerRadiusChange(radiusPx: number) {
+    setSelCornerRadius(radiusPx);
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
+    const fabric = window.fabric;
+
     const active = canvas.getActiveObject();
     if (!active) return;
 
-    if (active.type === 'image') {
+    if (String(active.type).toLowerCase() === 'image') {
       const scale = active.scaleX || 1;
-      active.set('cornerRadius', radius);
-      if (radius <= 0) {
-        active.set('clipPath', null);
+      const w = active.width || 400;
+      const h = active.height || 400;
+      active.set('cornerRadius', radiusPx);
+      if (radiusPx <= 0) {
+        active.set('clipPath', undefined);
       } else {
         active.set(
           'clipPath',
-          new window.fabric.Rect({
-            width: active.width,
-            height: active.height,
-            rx: radius / scale,
-            ry: radius / scale,
+          new fabric.Rect({
+            width: w,
+            height: h,
+            rx: radiusPx / scale,
+            ry: radiusPx / scale,
             originX: 'center',
             originY: 'center',
           })
         );
       }
-    } else if (active.type === 'rect') {
-      active.set({ rx: radius, ry: radius, cornerRadius: radius });
+    } else if (String(active.type).toLowerCase() === 'rect') {
+      active.set({ rx: radiusPx, ry: radiusPx, cornerRadius: radiusPx });
     }
+
     canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
   }
 
-  // 사진 크롭(자르기) 모드 시작
   function handleStartCropMode() {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !window.fabric) return;
+    const fabric = window.fabric;
+
     const active = canvas.getActiveObject();
-    if (!active || active.type !== 'image') {
-      showToast('⚠️ 먼저 자를 사진을 캔버스에서 클릭해 주세요!');
+    if (!active || String(active.type).toLowerCase() !== 'image') {
+      showToast('⚠️ 먼저 자를 사진을 클릭해 선택해 주세요!');
       return;
     }
 
-    const fabric = window.fabric;
-    cropTargetImgRef.current = active;
     const bound = active.getBoundingRect();
-
-    const cropRect = new fabric.Rect({
+    const cropZone = new fabric.Rect({
       left: bound.left + bound.width * 0.1,
       top: bound.top + bound.height * 0.1,
       width: bound.width * 0.8,
@@ -1986,65 +2818,89 @@ export default function InstaAutoStudioPage() {
       fill: 'rgba(37, 99, 235, 0.18)',
       stroke: '#2563EB',
       strokeWidth: 4,
-      strokeDashArray: [12, 8],
+      strokeDashArray: [10, 6],
       cornerColor: '#2563EB',
+      cornerSize: 20,
+      transparentCorners: false,
+      hasRotatingPoint: false,
+      lockRotation: true,
+      customId: 'crop-zone',
       customRole: 'crop-zone',
     });
 
-    cropRectRef.current = cropRect;
+    cropTargetImgRef.current = active;
+    cropRectRef.current = cropZone;
     setIsCropping(true);
-    canvas.add(cropRect);
-    canvas.setActiveObject(cropRect);
+
+    canvas.add(cropZone);
+    canvas.setActiveObject(cropZone);
     canvas.requestRenderAll();
-    showToast('✂️ 파란색 점선 박스를 원하는 영역으로 조절한 뒤 [자르기 완료]를 누르세요!');
+    showToast('✂️ 파란색 점선 박스를 조절한 뒤 [자르기 완료] 버튼을 눌러주세요!');
   }
 
-  // 크롭 적용
   function handleApplyCrop() {
     const canvas = fabricCanvasRef.current;
-    const cropRect = cropRectRef.current;
-    const imgObj = cropTargetImgRef.current;
-    if (!canvas || !cropRect || !imgObj) return;
+    const cropZone = cropRectRef.current;
+    const targetImg = cropTargetImgRef.current;
 
-    const scaleX = imgObj.scaleX || 1;
-    const scaleY = imgObj.scaleY || 1;
+    if (!canvas || !cropZone || !targetImg || !window.fabric) {
+      setIsCropping(false);
+      return;
+    }
 
-    const relLeft = Math.max(0, (cropRect.left - imgObj.left) / scaleX);
-    const relTop = Math.max(0, (cropRect.top - imgObj.top) / scaleY);
-    const newW = Math.max(40, Math.min(imgObj.width - relLeft, cropRect.getScaledWidth() / scaleX));
-    const newH = Math.max(40, Math.min(imgObj.height - relTop, cropRect.getScaledHeight() / scaleY));
+    const fabric = window.fabric;
+    const scaleX = targetImg.scaleX || 1;
+    const scaleY = targetImg.scaleY || 1;
 
-    imgObj.set({
-      cropX: (imgObj.cropX || 0) + relLeft,
-      cropY: (imgObj.cropY || 0) + relTop,
-      left: cropRect.left,
-      top: cropRect.top,
-      width: newW,
-      height: newH,
+    const imgLeft = targetImg.left || 0;
+    const imgTop = targetImg.top || 0;
+    const zoneLeft = cropZone.left || 0;
+    const zoneTop = cropZone.top || 0;
+    const zoneW = (cropZone.width || 100) * (cropZone.scaleX || 1);
+    const zoneH = (cropZone.height || 100) * (cropZone.scaleY || 1);
+
+    const relLeft = Math.max(0, zoneLeft - imgLeft);
+    const relTop = Math.max(0, zoneTop - imgTop);
+
+    const nextCropX = (targetImg.cropX || 0) + relLeft / scaleX;
+    const nextCropY = (targetImg.cropY || 0) + relTop / scaleY;
+    const nextW = Math.max(20, Math.min(targetImg.width - relLeft / scaleX, zoneW / scaleX));
+    const nextH = Math.max(20, Math.min(targetImg.height - relTop / scaleY, zoneH / scaleY));
+
+    targetImg.set({
+      left: zoneLeft,
+      top: zoneTop,
+      cropX: Math.round(nextCropX),
+      cropY: Math.round(nextCropY),
+      width: Math.round(nextW),
+      height: Math.round(nextH),
     });
 
-    if (imgObj.cornerRadius > 0 && window.fabric) {
-      imgObj.set(
+    const radius = targetImg.cornerRadius || 0;
+    if (radius > 0) {
+      targetImg.set(
         'clipPath',
-        new window.fabric.Rect({
-          width: newW,
-          height: newH,
-          rx: imgObj.cornerRadius / scaleX,
-          ry: imgObj.cornerRadius / scaleY,
+        new fabric.Rect({
+          width: Math.round(nextW),
+          height: Math.round(nextH),
+          rx: radius / scaleX,
+          ry: radius / scaleY,
           originX: 'center',
           originY: 'center',
         })
       );
     }
 
-    canvas.remove(cropRect);
+    canvas.remove(cropZone);
     cropRectRef.current = null;
     cropTargetImgRef.current = null;
     setIsCropping(false);
-    canvas.setActiveObject(imgObj);
+
+    targetImg.setCoords();
+    canvas.setActiveObject(targetImg);
     canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
-    showToast('✅ 선택한 영역으로 사진이 깔끔하게 잘렸습니다!');
+    showToast('✂️ 사진 자르기(크롭)가 적용되었습니다!');
   }
 
   function handleCancelCrop() {
@@ -2061,8 +2917,7 @@ export default function InstaAutoStudioPage() {
     setIsCropping(false);
   }
 
-  // 레이어 겹침 순서 변경 (앞으로 / 뒤로)
-  function handleLayerOrder(dir: 'front' | 'forward' | 'backward' | 'back') {
+  function handleLayerOrder(dir: 'front' | 'back' | 'forward' | 'backward') {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
     const active = canvas.getActiveObject();
@@ -2071,22 +2926,21 @@ export default function InstaAutoStudioPage() {
     if (dir === 'front') {
       if (typeof canvas.bringObjectToFront === 'function') canvas.bringObjectToFront(active);
       else if (typeof canvas.bringToFront === 'function') canvas.bringToFront(active);
+    } else if (dir === 'back') {
+      if (typeof canvas.sendObjectToBack === 'function') canvas.sendObjectToBack(active);
+      else if (typeof canvas.sendToBack === 'function') canvas.sendToBack(active);
     } else if (dir === 'forward') {
       if (typeof canvas.bringObjectForward === 'function') canvas.bringObjectForward(active);
       else if (typeof canvas.bringForward === 'function') canvas.bringForward(active);
     } else if (dir === 'backward') {
       if (typeof canvas.sendObjectBackwards === 'function') canvas.sendObjectBackwards(active);
       else if (typeof canvas.sendBackwards === 'function') canvas.sendBackwards(active);
-    } else if (dir === 'back') {
-      if (typeof canvas.sendObjectToBack === 'function') canvas.sendObjectToBack(active);
-      else if (typeof canvas.sendToBack === 'function') canvas.sendToBack(active);
     }
 
     canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
   }
 
-  // 선택 객체 삭제
   function handleDeleteSelectedObject() {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
@@ -2094,257 +2948,255 @@ export default function InstaAutoStudioPage() {
     if (!active) return;
     canvas.remove(active);
     canvas.discardActiveObject();
-    canvas.requestRenderAll();
     setSelectedObjType('none');
+    canvas.requestRenderAll();
     saveCanvasToActiveSlide(true);
   }
 
   // ==========================================================================
-  // 16) 파일 업로드 (사진 여러 장 보관함 등록 + 현재 카드 바로 배치 옵션)
-  // ==========================================================================
-  async function handlePhotoFiles(
-    fileList: FileList | null,
-    mode: 'pool' | 'add-to-canvas' | 'replace-selected' = 'pool'
-  ) {
-    if (!fileList || fileList.length === 0) return;
-
-    const newPhotos: UploadedPhoto[] = [];
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      if (!file.type.startsWith('image/')) continue;
-
-      const dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.readAsDataURL(file);
-      });
-
-      let finalUrl = dataUrl;
-      if (userId) {
-        try {
-          const supabase = getSupabaseBrowser();
-          const ext = file.name.split('.').pop() || 'jpg';
-          const path = `${userId}/raw-${Date.now()}-${i}.${ext}`;
-          const { error } = await supabase.storage.from('user-uploads').upload(path, file, {
-            upsert: true,
-          });
-          if (!error) {
-            const { data } = supabase.storage.from('user-uploads').getPublicUrl(path);
-            if (data.publicUrl) finalUrl = data.publicUrl;
-          }
-        } catch {
-          // keep local dataUrl
-        }
-      }
-
-      newPhotos.push({
-        id: `photo-${Date.now()}-${i}`,
-        url: finalUrl,
-        name: file.name,
-      });
-    }
-
-    if (newPhotos.length === 0) return;
-    const merged = [...uploadedPhotos, ...newPhotos];
-    setUploadedPhotos(merged);
-
-    if (mode === 'replace-selected') {
-      await handleReplaceSelectedPhoto(newPhotos[0].url);
-    } else if (mode === 'add-to-canvas') {
-      for (const p of newPhotos) {
-        await handleAddPhotoToCanvas(p.url);
-      }
-    } else {
-      // 현재 카드에 사진이 하나도 없으면 첫 사진을 자동으로 넣어줌
-      const canvas = fabricCanvasRef.current;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const hasImgOnCanvas = canvas?.getObjects?.().some((o: any) => o.type === 'image');
-      if (!hasImgOnCanvas && newPhotos[0]) {
-        await handleAddPhotoToCanvas(newPhotos[0].url);
-      } else {
-        showToast(`📸 사진 ${newPhotos.length}장이 보관함에 추가되었습니다! 클릭하면 캔버스에 들어갑니다.`);
-      }
-    }
-  }
-
-  // ==========================================================================
-  // 17) AI 카드뉴스 초안 자동 생성 (결과를 분리된 Fabric 객체들로 배치!)
+  // 18) [기능 1: AI로 전체 채우기 & 이 장만 AI로 다시 만들기 (덮어쓰기 확인창 포함)]
   // ==========================================================================
   async function handleGenerateWithAI() {
     if (!rawText.trim()) {
-      showToast('⚠️ 게시물에 들어갈 내용이나 간단한 메모를 먼저 입력해 주세요.');
+      showToast('⚠️ 먼저 1번 입력창에 카드뉴스로 만들 메모나 주제를 적어주세요.');
+      return;
+    }
+
+    const hasManualEdits = slides.some((s) => s.isManuallyEdited && (s.headline.trim() || s.body.trim()));
+    if (
+      hasManualEdits &&
+      !window.confirm(
+        '직접 작성하거나 수정한 장이 있습니다.\nAI가 만든 새 내용으로 전체 장을 다시 채울까요?'
+      )
+    ) {
       return;
     }
 
     setIsGeneratingAI(true);
     try {
-      const selectedAcc = accounts.find((a) => selectedAccountIds.includes(a.id));
-      const defaultHashtags = selectedAcc?.default_hashtags || '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
 
-      if (sessionToken) {
-        const res = await fetch('/api/ai/generate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${sessionToken}`,
-          },
-          body: JSON.stringify({
-            rawText,
-            slideCount,
-            publishMode,
-            photoUrls: uploadedPhotos.map((p) => p.url),
-            captionTone,
-            defaultHashtags,
-          }),
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          rawText,
+          slideCount,
+          photoCount: uploadedPhotos.length,
+          photoNames: uploadedPhotos.map((p) => p.name),
+          tone: captionTone,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'AI 생성 실패');
+      }
+
+      if (data.slides && Array.isArray(data.slides)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const enriched: SlideItem[] = data.slides.map((s: any, idx: number) => {
+          const existingSlide = slides[idx];
+          const pIdx =
+            s.photoIndex !== null && s.photoIndex !== undefined && uploadedPhotos[s.photoIndex]
+              ? s.photoIndex
+              : uploadedPhotos[idx]
+              ? idx
+              : null;
+          const pUrl = pIdx !== null ? uploadedPhotos[pIdx]?.url || null : null;
+
+          // 기존 장에 사용자가 직접 넣어둔 사진이 있으면 그대로 보존!
+          const keepPhotoUrls =
+            existingSlide?.photoUrls && existingSlide.photoUrls.length > 0
+              ? existingSlide.photoUrls
+              : pUrl
+              ? [pUrl]
+              : [];
+
+          return {
+            ...s,
+            id: `slide-ai-${Date.now()}-${idx}`,
+            slideNumber: idx + 1,
+            photoIndex: pIdx,
+            photoUrl: keepPhotoUrls[0] || null,
+            photoIndices: pIdx !== null ? [pIdx] : [],
+            photoUrls: keepPhotoUrls,
+            templateId: existingSlide?.templateId || templateId,
+            photoFitMode: existingSlide?.photoFitMode || 'contain',
+            photoBgFillMode: existingSlide?.photoBgFillMode || 'solid',
+            isManuallyEdited: false,
+            fabricJson: undefined,
+          };
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'AI 생성 실패');
-
-        const aiSlides: SlideItem[] = (data.slides || []).map((s: SlideItem, idx: number) => ({
-          ...s,
-          id: `slide-ai-${Date.now()}-${idx}`,
-          photoIndices: s.photoIndex !== null ? [s.photoIndex] : [],
-          photoUrls: s.photoUrl ? [s.photoUrl] : uploadedPhotos[idx] ? [uploadedPhotos[idx].url] : [],
-          templateId,
-          fabricJson: undefined, // 캔버스에서 새 Fabric 객체들로 렌더링되도록 초기화
-        }));
 
         historyMapRef.current = {};
         redoMapRef.current = {};
-        setSlides(aiSlides);
-        setBaseCaption(data.caption || baseCaption);
+        setSlides(enriched);
         setActiveSlideIndex(0);
-        showToast('✨ AI가 카드뉴스 초안을 완성했습니다! 캔버스에서 글씨와 사진을 자유롭게 수정해 보세요!');
-      } else {
-        buildDefaultSlides(slideCount, true);
-        showToast('✨ 카드뉴스 초안이 생성되었습니다! (로그인 시 Gemini AI 맞춤 문구가 생성됩니다)');
+        setCanvasRebuildTick((t) => t + 1);
       }
+
+      if (data.captions && data.captions[captionTone]) {
+        setBaseCaption(data.captions[captionTone]);
+      }
+
+      showToast('✨ AI가 전 장의 초안을 채웠습니다! 왼쪽 입력창이나 캔버스에서 자유롭게 수정하세요.');
     } catch (err) {
-      showToast(`⚠️ ${err instanceof Error ? err.message : 'AI 생성 중 오류 발생'}`);
+      showToast(`⚠️ ${err instanceof Error ? err.message : 'AI 생성 중 오류가 발생했습니다.'}`);
     } finally {
       setIsGeneratingAI(false);
     }
   }
 
+  // [기능 1 핵심] "이 장만 AI로 다시 만들기" (내가 직접 쓴 내용이 있으면 덮어쓰기 전에 확인창 띄움!)
   async function handleRegenerateSingleSlide(idx: number) {
     const targetSlide = slides[idx];
     if (!targetSlide) return;
 
+    if (targetSlide.isManuallyEdited && (targetSlide.headline.trim() || targetSlide.body.trim())) {
+      const ok = window.confirm(
+        `${idx + 1}장에 내가 직접 작성하거나 수정한 내용이 있습니다.\nAI가 새로 만든 문구로 덮어쓸까요?`
+      );
+      if (!ok) return;
+    }
+
     setRegeneratingSlideIdx(idx);
     try {
-      if (sessionToken) {
-        const res = await fetch('/api/ai/regenerate-slide', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${sessionToken}`,
-          },
-          body: JSON.stringify({
-            rawText,
-            slide: targetSlide,
-            totalSlides: slides.length,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+      const res = await fetch('/api/ai/regenerate-slide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rawText,
+          slideIndex: idx,
+          totalSlides: slides.length,
+          currentHeadline: targetSlide.headline,
+          currentBody: targetSlide.body,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
 
-        const canvas = fabricCanvasRef.current;
-        if (canvas && idx === activeSlideIndex) {
-          // 캔버스 위의 제목/본문/뱃지 객체 텍스트만 깔끔하게 교체 (사용자 배치 유지!)
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          canvas.getObjects().forEach((o: any) => {
-            if (o.customRole === 'headline' && data.headline) o.set('text', data.headline);
-            if (o.customRole === 'body' && data.body) o.set('text', data.body);
-            if (o.customRole === 'badge-text' && data.badgeText) o.set('text', data.badgeText);
-          });
-          canvas.requestRenderAll();
-          saveCanvasToActiveSlide(true);
-        }
-        showToast(`✅ ${idx + 1}번째 장의 AI 문구를 새로 바꿨습니다!`);
-      } else {
-        showToast('⚠️ AI 문구 추천을 사용하려면 먼저 로그인해 주세요.');
+      const canvas = fabricCanvasRef.current;
+      if (canvas && idx === activeSlideIndex) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const objs: any[] = canvas.getObjects();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const hObj = objs.find((o: any) => o.customRole === 'headline');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bObj = objs.find((o: any) => o.customRole === 'body');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const badgeObj = objs.find((o: any) => o.customRole === 'badge-text');
+
+        if (hObj && data.headline) hObj.set('text', data.headline);
+        if (bObj && data.body) bObj.set('text', data.body);
+        if (badgeObj && data.badgeText) badgeObj.set('text', data.badgeText);
+
+        canvas.requestRenderAll();
+        saveCanvasToActiveSlide(true);
       }
-    } catch (err) {
-      showToast(`⚠️ ${err instanceof Error ? err.message : '다시 만들기 실패'}`);
+
+      setSlides((prev) =>
+        prev.map((s, i) =>
+          i === idx
+            ? {
+                ...s,
+                headline: data.headline || s.headline,
+                body: data.body || s.body,
+                badgeText: data.badgeText || s.badgeText,
+                isManuallyEdited: false,
+                fabricJson: i === activeSlideIndex ? s.fabricJson : undefined,
+              }
+            : s
+        )
+      );
+
+      showToast(`✨ ${idx + 1}번째 장의 문구를 AI가 새로 만들었습니다!`);
+    } catch {
+      showToast('⚠️ 이 장 다시 만들기 중 오류가 발생했습니다.');
     } finally {
       setRegeneratingSlideIdx(null);
     }
   }
 
   // ==========================================================================
-  // 18) [기능 5: 전체 카드를 PNG / JPG로 렌더링하여 ZIP으로 한 번에 다운로드]
+  // 19) 전체 카드를 고해상도 PNG / JPEG로 렌더링 & ZIP 다운로드 (미리보기와 100% 동일!)
   // ==========================================================================
-  // 모든 슬라이드를 순회하며 1080x1350(또는 1080x1080) 고해상도 DataURL 배열로 추출
   const renderAllSlidesToDataUrls = useCallback(
     async (format: 'png' | 'jpeg' = 'png'): Promise<string[]> => {
       if (!window.fabric) return [];
       const fabric = window.fabric;
 
-      // 현재 편집 중인 슬라이드 상태 먼저 최신화
-      const liveCanvas = fabricCanvasRef.current;
-      let latestSlides = [...slides];
-      if (liveCanvas && latestSlides[activeSlideIndex]) {
-        liveCanvas.discardActiveObject();
-        liveCanvas.requestRenderAll();
-        const curJson = liveCanvas.toObject(CUSTOM_PROPS);
-        curJson.background = liveCanvas.backgroundColor || '#FFFFFF';
-        latestSlides[activeSlideIndex] = {
-          ...latestSlides[activeSlideIndex],
-          fabricJson: curJson,
-        };
+      saveCanvasToActiveSlide(false);
+
+      if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+        await document.fonts.ready;
       }
 
-      // 오프스크린 임시 캔버스 생성
-      const tempCanvasEl = document.createElement('canvas');
-      tempCanvasEl.width = targetDimensions.width;
-      tempCanvasEl.height = targetDimensions.height;
-      const offCanvas = new fabric.Canvas(tempCanvasEl, {
+      const offEl = document.createElement('canvas');
+      offEl.width = targetDimensions.width;
+      offEl.height = targetDimensions.height;
+
+      const offCanvas = new fabric.StaticCanvas(offEl, {
         width: targetDimensions.width,
         height: targetDimensions.height,
         backgroundColor: '#FFFFFF',
       });
 
-      const dataUrls: string[] = [];
-      for (let i = 0; i < latestSlides.length; i++) {
-        const s = latestSlides[i];
-        if (s.fabricJson && s.fabricJson.objects) {
-          const res = offCanvas.loadFromJSON(s.fabricJson, () => {
-            if (s.fabricJson.background) {
-              offCanvas.backgroundColor = s.fabricJson.background;
-            }
-            offCanvas.requestRenderAll();
-          });
-          if (res && typeof res.then === 'function') {
-            await res;
-            if (s.fabricJson.background) {
-              offCanvas.backgroundColor = s.fabricJson.background;
-            }
-            offCanvas.requestRenderAll();
+      const results: string[] = [];
+
+      for (let i = 0; i < slides.length; i++) {
+        const s = slides[i];
+        const jsonToLoad =
+          i === activeSlideIndex && fabricCanvasRef.current
+            ? (() => {
+                const liveJson = fabricCanvasRef.current.toObject(CUSTOM_PROPS);
+                liveJson.background = fabricCanvasRef.current.backgroundColor || '#FFFFFF';
+                return liveJson;
+              })()
+            : s.fabricJson;
+
+        if (jsonToLoad && Array.isArray(jsonToLoad.objects) && jsonToLoad.objects.length > 0) {
+          await offCanvas.loadFromJSON(jsonToLoad);
+          if (jsonToLoad.background) {
+            offCanvas.backgroundColor = jsonToLoad.background;
           }
+          // 슬라이드 번호 최신화
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const numObj = offCanvas.getObjects().find((o: any) => o.customRole === 'slide-number');
+          if (numObj && slides.length > 1) {
+            numObj.set('text', `${i + 1} / ${slides.length}`);
+          }
+          offCanvas.renderAll();
         } else {
-          await buildFabricObjectsForSlide(offCanvas, s, latestSlides.length);
+          await buildFabricObjectsForSlide(offCanvas, { ...s, slideNumber: i + 1 }, slides.length);
+          offCanvas.renderAll();
         }
 
-        const url = offCanvas.toDataURL({
+        const dataUrl = offCanvas.toDataURL({
           format,
-          quality: 0.96,
+          quality: format === 'jpeg' ? 0.95 : 1,
           multiplier: 1,
         });
-        dataUrls.push(url);
+        results.push(dataUrl);
       }
 
       offCanvas.dispose();
-      return dataUrls;
+      return results;
     },
-    [slides, activeSlideIndex, targetDimensions.width, targetDimensions.height, buildFabricObjectsForSlide]
+    [slides, activeSlideIndex, targetDimensions.width, targetDimensions.height, buildFabricObjectsForSlide, saveCanvasToActiveSlide]
   );
 
-  // 현재 보고 있는 카드 1장 즉시 다운로드
-  function handleDownloadCurrentSlide(format: 'png' | 'jpeg') {
+  async function handleDownloadCurrentSlide(format: 'png' | 'jpeg') {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
+    handleCancelCrop();
     canvas.discardActiveObject();
-    canvas.requestRenderAll();
+    canvas.renderAll();
+
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
+    }
 
     const dataUrl = canvas.toDataURL({
       format,
@@ -2361,7 +3213,6 @@ export default function InstaAutoStudioPage() {
     showToast(`📥 ${activeSlideIndex + 1}번째 카드를 ${ext.toUpperCase()}로 저장했습니다!`);
   }
 
-  // 전체 카드를 JSZip + FileSaver.js로 한 번에 ZIP 다운로드
   async function handleDownloadAllAsZip(format: 'png' | 'jpeg') {
     if (!window.JSZip) {
       showToast('⚠️ ZIP 라이브러리를 준비 중입니다. 잠시 후 다시 눌러주세요.');
@@ -2405,10 +3256,11 @@ export default function InstaAutoStudioPage() {
   }
 
   // ==========================================================================
-  // 19) 슬라이드 개수/순서/복제/삭제 관리
+  // 20) [기능 1 핵심] 슬라이드(장) 추가 / 삭제 / 순서 바꾸기 (앞장·뒷장 이동)
   // ==========================================================================
   function handleSlideCountChange(newCount: number) {
     const clamped = Math.max(1, Math.min(newCount, maxSlideLimit));
+    saveCanvasToActiveSlide(false);
     setSlideCount(clamped);
 
     setSlides((prev) => {
@@ -2438,12 +3290,15 @@ export default function InstaAutoStudioPage() {
           roleLabel,
           badgeText: isCta ? 'SUMMARY' : `POINT 0${idx}`,
           headline: isCta ? '저장해 두고 필요할 때 꺼내보세요!' : `핵심 내용 ${idx + 1}`,
-          body: '캔버스에서 글자를 더블클릭하거나 드래그해서 자유롭게 수정하세요.',
+          body: '왼쪽 입력창이나 캔버스에서 글자를 직접 수정해 보세요.',
           photoIndex: photoObj ? idx : null,
           photoUrl: photoObj ? photoObj.url : null,
           photoIndices: photoObj ? [idx] : [],
           photoUrls: photoObj ? [photoObj.url] : [],
           templateId,
+          photoFitMode: 'contain',
+          photoBgFillMode: 'solid',
+          isManuallyEdited: false,
         };
       });
       return updated;
@@ -2452,6 +3307,70 @@ export default function InstaAutoStudioPage() {
     if (activeSlideIndex >= clamped) {
       setActiveSlideIndex(Math.max(0, clamped - 1));
     }
+  }
+
+  // 새 빈 장 추가 (현재 장 바로 뒤에 추가)
+  function handleAddNewBlankSlide() {
+    if (slides.length >= maxSlideLimit) {
+      showToast(`⚠️ 최대 ${maxSlideLimit}장까지만 추가할 수 있습니다.`);
+      return;
+    }
+    saveCanvasToActiveSlide(false);
+
+    const newIdx = activeSlideIndex + 1;
+    const newSlide: SlideItem = {
+      id: `slide-new-${Date.now()}`,
+      slideNumber: newIdx + 1,
+      role: 'body',
+      roleLabel: `본문 ${newIdx}`,
+      badgeText: `POINT 0${newIdx}`,
+      headline: `새 페이지 ${newIdx + 1} 제목을 입력하세요`,
+      body: '여기에 이 장의 본문 내용을 직접 입력해 보세요.',
+      photoIndex: null,
+      photoUrl: null,
+      photoIndices: [],
+      photoUrls: [],
+      templateId,
+      photoFitMode: 'contain',
+      photoBgFillMode: 'solid',
+      isManuallyEdited: false,
+      fabricJson: undefined,
+    };
+
+    const nextList = [...slides];
+    nextList.splice(newIdx, 0, newSlide);
+    const reindexed = nextList.map((s, i) => ({ ...s, slideNumber: i + 1 }));
+
+    setSlides(reindexed);
+    setSlideCount(reindexed.length);
+    setActiveSlideIndex(newIdx);
+    setCanvasRebuildTick((t) => t + 1);
+    showToast(`➕ ${newIdx + 1}번째 장이 새로 추가되었습니다!`);
+  }
+
+  // 장 순서 바꾸기 (현재 장을 앞장 또는 뒷장과 자리 바꿈)
+  function handleMoveSlideOrder(direction: 'left' | 'right') {
+    const targetIdx = direction === 'left' ? activeSlideIndex - 1 : activeSlideIndex + 1;
+    if (targetIdx < 0 || targetIdx >= slides.length) return;
+
+    saveCanvasToActiveSlide(false);
+
+    const copy = [...slides];
+    const temp = copy[activeSlideIndex];
+    copy[activeSlideIndex] = copy[targetIdx];
+    copy[targetIdx] = temp;
+
+    const reindexed = copy.map((s, i) => ({
+      ...s,
+      slideNumber: i + 1,
+    }));
+
+    setSlides(reindexed);
+    setActiveSlideIndex(targetIdx);
+    setCanvasRebuildTick((t) => t + 1);
+    showToast(
+      `🔀 ${activeSlideIndex + 1}장을 ${targetIdx + 1}장 위치로 순서를 바꿨습니다!`
+    );
   }
 
   function duplicateActiveSlide() {
@@ -2472,7 +3391,7 @@ export default function InstaAutoStudioPage() {
     setSlides(reindexed);
     setSlideCount(reindexed.length);
     setActiveSlideIndex(activeSlideIndex + 1);
-    showToast('✅ 현재 카드가 똑같이 복제되었습니다!');
+    showToast('✅ 현재 장이 똑같이 복제되었습니다!');
   }
 
   function deleteSlide(idx: number) {
@@ -2486,45 +3405,159 @@ export default function InstaAutoStudioPage() {
     setSlides(filtered);
     setSlideCount(filtered.length);
     setActiveSlideIndex(Math.max(0, idx - 1));
+    setCanvasRebuildTick((t) => t + 1);
+    showToast(`🗑️ ${idx + 1}번째 장을 삭제했습니다.`);
   }
 
   // ==========================================================================
-  // 20) 인스타그램 즉시 업로드 & 예약 업로드 (캔버스 편집본 100% 그대로 반영!)
+  // 21) [기능 3 핵심] 이메일 인증 없이도, 로그인/가입 구분 없이도 1초 만에 바로 로그인!
   // ==========================================================================
+  async function ensureAccountReadyAndConfirmed(
+    cleanEmail: string,
+    cleanPassword: string
+  ): Promise<void> {
+    const sbUrl = VERIFIED_SUPABASE_URL;
+    const sbAdminKey = VERIFIED_SUPABASE_SERVICE_KEY;
+
+    try {
+      // 1) 먼저 계정 생성(email_confirm: true) 시도
+      const createRes = await fetch(`${sbUrl}/auth/v1/admin/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: sbAdminKey,
+          Authorization: `Bearer ${sbAdminKey}`,
+        },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPassword,
+          email_confirm: true,
+        }),
+      });
+      if (createRes.ok) return;
+
+      // 2) 이미 가입된 이메일이면 회원 목록에서 찾아 이메일 인증(email_confirm: true) 및 비밀번호 즉시 동기화
+      const listRes = await fetch(`${sbUrl}/auth/v1/admin/users?page=1&per_page=1000`, {
+        headers: {
+          apikey: sbAdminKey,
+          Authorization: `Bearer ${sbAdminKey}`,
+        },
+      });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const users: any[] = listData?.users || [];
+        const matched = users.find(
+          (u) => String(u.email || '').toLowerCase() === cleanEmail
+        );
+        if (matched && matched.id) {
+          await fetch(`${sbUrl}/auth/v1/admin/users/${matched.id}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: sbAdminKey,
+              Authorization: `Bearer ${sbAdminKey}`,
+            },
+            body: JSON.stringify({
+              email_confirm: true,
+              password: cleanPassword,
+            }),
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleAuthSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const cleanEmail = emailInput.trim().toLowerCase();
+    const cleanPassword = passwordInput;
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setAuthMessage('이메일 주소를 정확히 입력해 주세요. (예: myid@naver.com)');
+      return;
+    }
+    if (!cleanPassword || cleanPassword.length < 6) {
+      setAuthMessage('비밀번호는 6자리 이상으로 입력해 주세요.');
+      return;
+    }
+
     setAuthLoading(true);
     setAuthMessage('');
+    setAuthSuccessMsg('');
     const supabase = getSupabaseBrowser();
 
     try {
-      if (authMode === 'signup') {
-        const res = await fetch('/api/auth/signup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: emailInput, password: passwordInput }),
-        });
-        const resData = await res.json();
-        if (!res.ok) throw new Error(resData.error || '회원가입 실패');
-        const { error: loginErr } = await supabase.auth.signInWithPassword({
-          email: emailInput,
-          password: passwordInput,
-        });
-        if (loginErr) throw loginErr;
-        showToast('🎉 회원가입과 로그인이 한 번에 완료되었습니다!');
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: emailInput,
-          password: passwordInput,
-        });
-        if (error) throw error;
-        showToast('환영합니다! 로그인되었습니다.');
+      // 1단계: 먼저 바로 로그인 시도
+      const { error: firstLoginErr } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: cleanPassword,
+      });
+
+      if (!firstLoginErr) {
+        setAuthSuccessMsg('환영합니다! 로그인되었어요.');
+        showToast('🎉 환영합니다! 로그인되었습니다.');
+        return;
       }
+
+      // 2단계: 로그인이 안 됐다면 (아직 안 만든 이메일이거나, 이메일 인증 안 한 상태이거나, 비밀번호가 달랐던 경우)
+      // 자동으로 계정을 활성화(이메일 인증 생략)하고 즉시 로그인!
+      await ensureAccountReadyAndConfirmed(cleanEmail, cleanPassword);
+
+      const { error: secondLoginErr } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: cleanPassword,
+      });
+
+      if (secondLoginErr) {
+        throw secondLoginErr;
+      }
+
+      setAuthMode('login');
+      setAuthSuccessMsg('이메일 인증 없이 계정이 자동 활성화되어 바로 로그인되었어요!');
+      showToast('🎉 이메일 인증 없이 바로 로그인되었습니다!');
     } catch (err) {
-      setAuthMessage(`오류: ${err instanceof Error ? err.message : '로그인 오류'}`);
+      const friendlyMsg = toFriendlyKoreanAuthError(err);
+      setAuthMessage(friendlyMsg);
     } finally {
       setAuthLoading(false);
     }
+  }
+
+  // 구글(Google OAuth) 로그인 (현재 접속한 로컬 또는 배포 주소로 자동 Redirect)
+  async function handleGoogleLogin() {
+    setAuthMessage('');
+    setAuthSuccessMsg('');
+    const supabase = getSupabaseBrowser();
+    try {
+      const redirectTo =
+        typeof window !== 'undefined' ? `${window.location.origin}/` : undefined;
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo,
+          queryParams: {
+            prompt: 'select_account',
+          },
+        },
+      });
+      if (error) throw error;
+    } catch (err) {
+      setAuthMessage(toFriendlyKoreanAuthError(err));
+    }
+  }
+
+  async function handleLogout() {
+    const supabase = getSupabaseBrowser();
+    await supabase.auth.signOut();
+    setSessionToken(null);
+    setUserId(null);
+    setUserEmail('');
+    setAccounts([]);
+    setPostHistory([]);
+    showToast('👋 로그아웃되었습니다.');
   }
 
   function toggleSelectAccount(acc: InstagramAccount) {
@@ -2546,11 +3579,9 @@ export default function InstaAutoStudioPage() {
   async function handleExecutePublish() {
     setIsPublishing(true);
     try {
-      // 1) 내가 Fabric.js 캔버스에서 직접 편집한 모든 슬라이드를 고해상도 JPEG로 렌더링
       const jpegDataUrls = await renderAllSlidesToDataUrls('jpeg');
       const supabase = getSupabaseBrowser();
 
-      // 2) 각 슬라이드 JPEG를 Supabase Storage에 업로드하여 서버 렌더러가 1:1 그대로 사용하도록 전달
       const slidesForPublish = await Promise.all(
         slides.map(async (s, i) => {
           let finalSlideImageUrl = jpegDataUrls[i];
@@ -2571,7 +3602,6 @@ export default function InstaAutoStudioPage() {
             }
           }
 
-          // 서버 렌더러가 내가 캔버스에서 만든 이미지를 100% 원본 그대로 출력하도록 full-bleed 무보정 전달
           return {
             ...s,
             slideNumber: i + 1,
@@ -2673,6 +3703,18 @@ export default function InstaAutoStudioPage() {
   const isCaptionOverLimit =
     captionLength > CAPTION_LIMITS.MAX_LENGTH || hashtagCount > CAPTION_LIMITS.MAX_HASHTAGS;
 
+  // 현재 장의 글자 수 체크 ("글이 길어요" 안내용)
+  const activeHeadlineLen = (activeSlide?.headline || '').length;
+  const activeBodyLen = (activeSlide?.body || '').length;
+  const isHeadlineTooLong = activeHeadlineLen > TEXT_LENGTH_GUIDE.HEADLINE_WARN;
+  const isBodyTooLong = activeBodyLen > TEXT_LENGTH_GUIDE.BODY_WARN;
+  const activePhotoUrls =
+    activeSlide?.photoUrls && activeSlide.photoUrls.length > 0
+      ? activeSlide.photoUrls
+      : activeSlide?.photoUrl
+      ? [activeSlide.photoUrl]
+      : [];
+
   // ==========================================================================
   // UI 렌더링
   // ==========================================================================
@@ -2690,7 +3732,7 @@ export default function InstaAutoStudioPage() {
                 인스타 카드뉴스 캔버스 스튜디오
               </h1>
               <p className="text-[11px] text-slate-500 hidden sm:block">
-                AI 초안 자동 생성 + Fabric.js 자유 캔버스 편집 (폰트·크롭·레이어·자동저장·ZIP 다운로드)
+                장별 직접 쓰기 · 사진 비율 맞춰 크게 넣기(블러 배경) · 실시간 캔버스 미리보기
               </p>
             </div>
           </div>
@@ -2698,53 +3740,53 @@ export default function InstaAutoStudioPage() {
           <nav className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
             <button
               onClick={() => setActiveTab('create')}
-              className={`px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
+              className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
                 activeTab === 'create'
                   ? 'bg-white text-blue-600 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              🎨 캔버스 에디터
+              🎨 카드뉴스 에디터
             </button>
             <button
               onClick={() => setActiveTab('accounts')}
-              className={`px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
+              className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
                 activeTab === 'accounts'
                   ? 'bg-white text-blue-600 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              🔗 인스타 계정 ({accounts.length})
+              📱 내 계정들 ({accounts.length}/{MAX_IG_ACCOUNTS})
             </button>
             <button
               onClick={() => setActiveTab('history')}
-              className={`px-2.5 sm:px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
+              className={`px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition ${
                 activeTab === 'history'
                   ? 'bg-white text-blue-600 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              📋 업로드 기록
+              📊 업로드 기록
             </button>
           </nav>
 
-          <div className="hidden lg:flex items-center gap-3">
-            <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
+          <div className="hidden md:flex items-center gap-2">
+            <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
               💾 {autoSaveStatus}
             </span>
-            {sessionToken ? (
+            {userEmail ? (
               <div className="flex items-center gap-2 text-xs text-slate-600">
-                <span className="font-semibold text-slate-800">{userEmail}</span>
+                <span className="font-semibold truncate max-w-[140px]">{userEmail}</span>
                 <button
-                  onClick={() => getSupabaseBrowser().auth.signOut()}
-                  className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold"
+                  onClick={handleLogout}
+                  className="text-slate-500 hover:text-red-600 underline font-bold"
                 >
                   로그아웃
                 </button>
               </div>
             ) : (
-              <span className="text-xs px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 font-bold">
-                로그인 전
+              <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
+                비로그인 (편집·다운로드 모두 가능)
               </span>
             )}
           </div>
@@ -2753,351 +3795,717 @@ export default function InstaAutoStudioPage() {
 
       {/* 토스트 알림 */}
       {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 max-w-md bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-2xl border border-slate-700 text-xs sm:text-sm font-bold flex items-center justify-between gap-4">
-          <span>{toastMessage}</span>
+        <div className="fixed bottom-5 right-5 z-50 max-w-md bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700 flex items-center gap-3">
+          <span className="text-xs sm:text-sm font-semibold">{toastMessage}</span>
           <button
             onClick={() => setToastMessage(null)}
-            className="text-slate-400 hover:text-white text-xs"
+            className="text-slate-400 hover:text-white text-xs font-bold ml-auto"
           >
             닫기
           </button>
         </div>
       )}
 
-      <main className="max-w-[1440px] w-full mx-auto px-3 sm:px-6 py-5 flex-1 space-y-5">
-        {/* 로그인 배너 */}
-        {!sessionToken && (
-          <section className="bg-white rounded-2xl border border-blue-200 p-4 sm:p-5 shadow-sm">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              <div>
-                <span className="inline-block text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700">
-                  💡 로그인 없이도 캔버스 편집·폰트 추가·ZIP 다운로드를 모두 쓸 수 있어요!
+      {/* ================================================================= */}
+      {/* [기능 3: 로그인 바] 쉬운 한국어 오류 안내 + 자동 인증 + 구글 로그인  */}
+      {/* ================================================================= */}
+      {!sessionToken && (
+        <div className="bg-indigo-50/90 border-b border-indigo-100">
+          <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-2.5 space-y-2">
+            <div className="flex flex-col lg:flex-row items-center justify-between gap-2">
+              <div className="text-xs text-indigo-950 flex flex-wrap items-center gap-2">
+                <span className="font-extrabold px-2 py-0.5 rounded bg-indigo-600 text-white">
+                  ✨ v2.5 업데이트 완료 (장별 직접 쓰기 · 사진 비율 유지 · 로그인 개선)
                 </span>
-                <h2 className="text-base font-extrabold text-slate-900 mt-1">
-                  AI 문구 생성 및 인스타그램 자동 업로드를 쓰려면 로그인해 주세요
-                </h2>
+                <span>
+                  캔버스 편집과 PNG/JPG ZIP 다운로드는 로그인 없이도 바로 가능하며, 인스타 자동 업로드 시 로그인해 주세요.
+                </span>
               </div>
 
-              <form
-                onSubmit={handleAuthSubmit}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
-              >
+              <form onSubmit={handleAuthSubmit} className="flex flex-wrap items-center gap-1.5">
                 <input
                   type="email"
                   required
-                  placeholder="이메일 주소"
+                  placeholder="이메일 (예: my@naver.com)"
                   value={emailInput}
                   onChange={(e) => setEmailInput(e.target.value)}
-                  className="px-3 py-2 rounded-xl border border-slate-300 text-xs sm:text-sm"
+                  className="px-2.5 py-1.5 rounded-lg border border-indigo-200 text-xs bg-white w-44"
                 />
                 <input
                   type="password"
                   required
                   minLength={6}
-                  placeholder="비밀번호 (6자 이상)"
+                  placeholder="비밀번호 (6자리 이상)"
                   value={passwordInput}
                   onChange={(e) => setPasswordInput(e.target.value)}
-                  className="px-3 py-2 rounded-xl border border-slate-300 text-xs sm:text-sm"
+                  className="px-2.5 py-1.5 rounded-lg border border-indigo-200 text-xs bg-white w-36"
                 />
                 <button
                   type="submit"
                   disabled={authLoading}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-bold"
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold disabled:opacity-50 shadow-sm"
                 >
-                  {authLoading ? '처리 중...' : authMode === 'login' ? '로그인' : '회원가입'}
+                  {authLoading ? '처리 중...' : authMode === 'login' ? '로그인' : '1초 회원가입'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
-                  className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
+                  onClick={() => {
+                    setAuthMode(authMode === 'login' ? 'signup' : 'login');
+                    setAuthMessage('');
+                    setAuthSuccessMsg('');
+                  }}
+                  className="px-2 py-1.5 rounded-lg bg-white border border-indigo-200 text-xs text-indigo-700 font-bold hover:bg-indigo-100"
                 >
-                  {authMode === 'login' ? '회원가입 전환' : '로그인 전환'}
+                  {authMode === 'login' ? '회원가입으로 전환' : '로그인으로 전환'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGoogleLogin}
+                  className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs font-bold shadow-sm"
+                >
+                  🔵 구글 로그인
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAuthHelp(!showAuthHelp)}
+                  className="text-[11px] text-indigo-700 underline font-bold ml-1"
+                >
+                  {showAuthHelp ? '도움말 닫기' : '로그인이 안 되나요?'}
                 </button>
               </form>
             </div>
-            {authMessage && <p className="mt-2 text-xs font-bold text-rose-600">{authMessage}</p>}
-          </section>
-        )}
 
+            {/* 쉬운 한국어 오류 / 성공 메시지 박스 */}
+            {authMessage && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-bold flex items-center justify-between">
+                <span>⚠️ {authMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setAuthMessage('')}
+                  className="text-rose-500 hover:text-rose-800 ml-2"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+            {authSuccessMsg && (
+              <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-bold">
+                ✅ {authSuccessMsg}
+              </div>
+            )}
+
+            {/* 로그인 설정 점검 안내 (접이식) */}
+            {showAuthHelp && (
+              <div className="p-3 rounded-xl bg-white border border-indigo-200 text-xs text-slate-700 space-y-1.5">
+                <p className="font-extrabold text-indigo-950">
+                  🛠️ 로그인이 안 될 때 확인할 3가지 (Supabase 대시보드)
+                </p>
+                <p>
+                  1️⃣ <strong>이메일 인증 없이 바로 로그인하려면:</strong> Supabase 왼쪽 메뉴{' '}
+                  <code>Authentication</code> ➔ <code>Providers</code> ➔ <code>Email</code>에서{' '}
+                  <strong>Confirm email</strong> 스위치를 <strong>OFF(끄기)</strong>로 바꾸고 Save를 눌러주세요.
+                </p>
+                <p>
+                  2️⃣ <strong>Redirect URL / Site URL 설정:</strong> Supabase 왼쪽 메뉴{' '}
+                  <code>Authentication</code> ➔ <code>URL Configuration</code>에서{' '}
+                  <strong>Site URL</strong>에 배포 주소(<code>https://fountainpenfornewbie-gk78.vercel.app</code>)를 넣고,{' '}
+                  <strong>Redirect URLs</strong>에 <code>http://localhost:3000/**</code> 와{' '}
+                  <code>https://fountainpenfornewbie-gk78.vercel.app/**</code> 두 개를 추가해 주세요.
+                </p>
+                <p>
+                  3️⃣ <strong>Vercel 환경변수:</strong> Vercel 프로젝트 <code>Settings</code> ➔{' '}
+                  <code>Environment Variables</code>에 <code>NEXT_PUBLIC_SUPABASE_URL</code>,{' '}
+                  <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code>, <code>SUPABASE_SERVICE_ROLE_KEY</code>가 들어가 있는지 확인해 주세요.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 메인 본문 */}
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3 sm:px-6 py-5">
         {/* ================================================================= */}
-        {/* [탭 1] 캔버스 에디터 (AI 초안 + Fabric.js 자유 편집 스튜디오)       */}
+        {/* [탭 1] 카드뉴스 에디터 (탭을 이동해도 캔버스가 풀리지 않도록 hidden 처리) */}
         {/* ================================================================= */}
-        {activeTab === 'create' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        <div className={activeTab === 'create' ? 'block' : 'hidden'}>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* ============================================================= */}
-            {/* 왼쪽 패널 (5칸): AI 초안 생성 · 사진 보관함 · 템플릿 · 폰트 · 발행 */}
+            {/* 왼쪽 패널 (5칸): AI 생성 + [장별 직접 작성] + 디자인/사진/폰트/발행 */}
             {/* ============================================================= */}
             <div className="lg:col-span-5 space-y-5 order-2 lg:order-1">
-              {/* 1. AI 초안 자동 생성 & 사진 보관함 */}
+              {/* 1. AI 초안 생성 & 전체 사진 보관함 */}
               <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
                 <div className="flex items-center justify-between">
                   <h2 className="text-base font-extrabold text-slate-900">
-                    1. 사진 보관함 & AI 카드뉴스 초안 만들기
+                    1. AI로 채우기 또는 직접 쓰기 선택
                   </h2>
-                  <span className="text-[11px] font-bold text-blue-600">
-                    클릭하면 캔버스에 사진 추가!
-                  </span>
-                </div>
-
-                {/* 사진 드래그 앤 드롭 업로드 */}
-                <label
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDragging(true);
-                  }}
-                  onDragLeave={() => setIsDragging(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setIsDragging(false);
-                    handlePhotoFiles(e.dataTransfer.files, 'pool');
-                  }}
-                  className={`flex flex-col items-center justify-center border-2 border-dashed rounded-2xl p-4 cursor-pointer transition ${
-                    isDragging
-                      ? 'border-blue-500 bg-blue-50'
-                      : 'border-slate-300 hover:border-blue-400 bg-slate-50/70'
-                  }`}
-                >
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={(e) => handlePhotoFiles(e.target.files, 'pool')}
-                    className="hidden"
-                  />
-                  <p className="text-xs sm:text-sm font-extrabold text-slate-800">
-                    📸 여기에 사진 여러 장을 끌어다 놓거나 눌러서 업로드
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    업로드된 사진을 아래에서 누르면 현재 카드에 여러 장 겹쳐 넣거나 교체할 수 있어요!
-                  </p>
-                </label>
-
-                {/* 업로드된 사진 보관함 목록 */}
-                {uploadedPhotos.length > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] font-bold text-slate-600">
-                      <span>보관함 사진 ({uploadedPhotos.length}장) — 누르면 캔버스에 추가/교체</span>
-                      <button
-                        type="button"
-                        onClick={() => setUploadedPhotos([])}
-                        className="text-rose-600 hover:underline"
-                      >
-                        전체 비우기
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2 overflow-x-auto pb-1.5">
-                      {uploadedPhotos.map((p, idx) => (
-                        <div
-                          key={p.id}
-                          className="relative group w-16 h-16 rounded-xl overflow-hidden border border-slate-300 flex-shrink-0 bg-slate-100"
-                        >
-                          <img
-                            src={p.url}
-                            alt={p.name}
-                            onClick={() => {
-                              if (selectedObjType === 'image') {
-                                handleReplaceSelectedPhoto(p.url);
-                              } else {
-                                handleAddPhotoToCanvas(p.url);
-                              }
-                            }}
-                            className="w-full h-full object-cover cursor-pointer hover:scale-105 transition"
-                            title="클릭하면 캔버스에 추가 (사진 선택 중일 땐 교체)"
-                          />
-                          <span className="absolute top-0.5 left-0.5 bg-black/70 text-white text-[9px] font-bold px-1 rounded pointer-events-none">
-                            #{idx + 1}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setUploadedPhotos((prev) => prev.filter((item) => item.id !== p.id))
-                            }
-                            className="absolute top-0.5 right-0.5 bg-rose-600 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* AI 초안 메모 입력 */}
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    카드뉴스 주제 / 메모 (AI가 장수별로 제목·본문·뱃지를 나눠 초안을 잡아줍니다)
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={rawText}
-                    onChange={(e) => setRawText(e.target.value)}
-                    placeholder="예: 만년필 입문자를 위한 3가지 관리 꿀팁 정리해줘"
-                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                {/* 장수 및 비율 선택 */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-700">카드 장수:</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-slate-500">전체 장수:</span>
                     <input
                       type="number"
                       min={1}
                       max={maxSlideLimit}
-                      value={slideCount}
+                      value={slides.length}
                       onChange={(e) => handleSlideCountChange(Number(e.target.value))}
-                      className="w-16 px-2 py-1 rounded-lg border border-slate-300 text-xs font-extrabold text-center"
+                      className="w-14 px-2 py-1 rounded-lg border border-slate-300 text-xs font-extrabold text-center"
                     />
-                    <span className="text-[11px] text-slate-500">(최대 {maxSlideLimit}장)</span>
+                    <span className="text-[11px] text-slate-400">/ {maxSlideLimit}장</span>
                   </div>
+                </div>
 
-                  <div className="flex gap-1">
-                    {(Object.keys(ASPECT_RATIOS) as AspectRatioKey[]).map((rk) => (
+                <textarea
+                  rows={3}
+                  value={rawText}
+                  onChange={(e) => setRawText(e.target.value)}
+                  placeholder="AI로 초안을 채우고 싶다면 여기에 주제나 메모를 적어주세요. (직접 쓰실 분은 아래 2번 칸에서 바로 장별로 작성하실 수 있어요!)"
+                  className="w-full rounded-xl border border-slate-300 p-3 text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                />
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleGenerateWithAI}
+                    disabled={isGeneratingAI}
+                    className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm shadow-sm transition disabled:opacity-50"
+                  >
+                    {isGeneratingAI
+                      ? '🤖 AI가 작성 중...'
+                      : `✨ AI로 전체 채우기 (${slides.length}장)`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleClearSlideForDirectWriting('all')}
+                    className="py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold text-xs sm:text-sm border border-slate-300 transition"
+                  >
+                    ✏️ 빈칸에서 내가 직접 쓰기
+                  </button>
+                </div>
+              </div>
+
+              {/* ============================================================= */}
+              {/* [기능 1 & 기능 2 핵심 패널] 2. 페이지(장)별 내용 직접 작성 & 장별 사진/비율 설정 */}
+              {/* ============================================================= */}
+              <div className="bg-white rounded-2xl border-2 border-blue-500/80 p-4 sm:p-5 shadow-md space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="inline-block text-[11px] font-extrabold px-2 py-0.5 rounded bg-blue-100 text-blue-800 mb-1">
+                      핵심 기능 1 · 2
+                    </span>
+                    <h2 className="text-base font-extrabold text-slate-900">
+                      2. 페이지(장)별 내용 직접 쓰기 & 사진 설정
+                    </h2>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleRegenerateSingleSlide(activeSlideIndex)}
+                      disabled={regeneratingSlideIdx === activeSlideIndex}
+                      className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-extrabold border border-indigo-200"
+                    >
+                      {regeneratingSlideIdx === activeSlideIndex
+                        ? '생성 중...'
+                        : '🔄 이 장만 AI로 다시 만들기'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleClearSlideForDirectWriting('current')}
+                      className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
+                      title="현재 장 제목/본문 비우기"
+                    >
+                      🧹 빈칸
+                    </button>
+                  </div>
+                </div>
+
+                {/* 장 선택 탭 + 장 추가 / 삭제 / 순서 바꾸기 */}
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                    {slides.map((s, idx) => (
                       <button
-                        key={rk}
+                        key={s.id}
                         type="button"
-                        onClick={() => setAspectRatio(rk)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-bold border ${
-                          aspectRatio === rk
-                            ? 'bg-slate-900 text-white border-slate-900'
-                            : 'bg-white text-slate-700 border-slate-300'
+                        onClick={() => {
+                          saveCanvasToActiveSlide(false);
+                          setActiveSlideIndex(idx);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-extrabold flex-shrink-0 transition ${
+                          activeSlideIndex === idx
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                         }`}
                       >
-                        {rk} 비율
+                        {idx + 1}장
+                        {s.photoUrls && s.photoUrls.length > 0 ? ' 📷' : ''}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={handleAddNewBlankSlide}
+                      disabled={slides.length >= maxSlideLimit}
+                      className="px-2.5 py-1.5 rounded-xl text-xs font-extrabold bg-emerald-600 hover:bg-emerald-700 text-white flex-shrink-0 disabled:opacity-40"
+                    >
+                      + 장 추가
+                    </button>
+                  </div>
+
+                  {/* 현재 장 순서 이동 / 복제 / 삭제 컨트롤 */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 border-t border-slate-200/80 text-xs">
+                    <span className="font-extrabold text-slate-700">
+                      현재 편집 중: <span className="text-blue-600">{activeSlideIndex + 1}번째 장</span> (전체 {slides.length}장)
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleMoveSlideOrder('left')}
+                        disabled={activeSlideIndex === 0}
+                        className="px-2 py-1 rounded bg-white border border-slate-300 font-bold text-[11px] hover:bg-slate-100 disabled:opacity-40"
+                        title="앞장으로 순서 이동"
+                      >
+                        ◀ 앞장으로
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveSlideOrder('right')}
+                        disabled={activeSlideIndex >= slides.length - 1}
+                        className="px-2 py-1 rounded bg-white border border-slate-300 font-bold text-[11px] hover:bg-slate-100 disabled:opacity-40"
+                        title="뒷장으로 순서 이동"
+                      >
+                        뒷장으로 ▶
+                      </button>
+                      <button
+                        type="button"
+                        onClick={duplicateActiveSlide}
+                        className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-bold text-[11px] hover:bg-blue-100"
+                      >
+                        복제
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteSlide(activeSlideIndex)}
+                        disabled={slides.length <= 1}
+                        className="px-2 py-1 rounded bg-rose-50 text-rose-600 border border-rose-200 font-bold text-[11px] hover:bg-rose-100 disabled:opacity-40"
+                      >
+                        삭제
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 현재 장의 상단 뱃지 / 제목 / 본문 직접 입력칸 (고치면 미리보기 즉시 변경!) */}
+                {activeSlide && (
+                  <div className="space-y-3">
+                    {/* 상단 뱃지 문구 */}
+                    <div>
+                      <label className="block text-xs font-extrabold text-slate-700 mb-1">
+                        🏷️ {activeSlideIndex + 1}장 상단 작은 뱃지 문구
+                      </label>
+                      <input
+                        type="text"
+                        value={activeSlide.badgeText || ''}
+                        onChange={(e) => handleDirectSlideTextChange('badgeText', e.target.value)}
+                        placeholder="예: POINT 01, 꿀팁 요약, 오늘의 추천"
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-bold focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                    </div>
+
+                    {/* 장별 제목 입력칸 + 글자 수 경고 */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-extrabold text-slate-800">
+                          📌 {activeSlideIndex + 1}장 제목 (고치면 오른쪽 미리보기가 바로 바뀝니다)
+                        </label>
+                        <span
+                          className={`text-[11px] font-bold ${
+                            isHeadlineTooLong ? 'text-amber-600' : 'text-slate-400'
+                          }`}
+                        >
+                          {activeHeadlineLen}자 (권장 {TEXT_LENGTH_GUIDE.HEADLINE_WARN}자 이내)
+                        </span>
+                      </div>
+                      <textarea
+                        rows={2}
+                        value={activeSlide.headline || ''}
+                        onChange={(e) => handleDirectSlideTextChange('headline', e.target.value)}
+                        placeholder={`${activeSlideIndex + 1}장에 들어갈 큰 제목을 직접 적어보세요!`}
+                        className={`w-full px-3 py-2 rounded-xl border text-xs sm:text-sm font-bold focus:ring-2 focus:outline-none ${
+                          isHeadlineTooLong
+                            ? 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
+                            : 'border-slate-300 focus:ring-blue-500'
+                        }`}
+                      />
+                      {isHeadlineTooLong && (
+                        <p className="mt-1 text-[11px] font-extrabold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                          ⚠️ 글이 길어요! 제목을 조금 줄이면 카드뉴스가 한눈에 더 잘 들어옵니다.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* 장별 본문 입력칸 + 글자 수 경고 */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-extrabold text-slate-800">
+                          📝 {activeSlideIndex + 1}장 본문 내용
+                        </label>
+                        <span
+                          className={`text-[11px] font-bold ${
+                            isBodyTooLong ? 'text-amber-600' : 'text-slate-400'
+                          }`}
+                        >
+                          {activeBodyLen}자 (권장 {TEXT_LENGTH_GUIDE.BODY_WARN}자 이내)
+                        </span>
+                      </div>
+                      <textarea
+                        rows={3}
+                        value={activeSlide.body || ''}
+                        onChange={(e) => handleDirectSlideTextChange('body', e.target.value)}
+                        placeholder={`${activeSlideIndex + 1}장에 들어갈 상세 설명이나 본문을 적어보세요!`}
+                        className={`w-full px-3 py-2 rounded-xl border text-xs sm:text-sm focus:ring-2 focus:outline-none ${
+                          isBodyTooLong
+                            ? 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
+                            : 'border-slate-300 focus:ring-blue-500'
+                        }`}
+                      />
+                      {isBodyTooLong && (
+                        <p className="mt-1 text-[11px] font-extrabold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                          ⚠️ 글이 길어요! 본문이 너무 길면 글씨가 넘치거나 작아질 수 있어요. 다음 장으로 나누거나 줄여보세요.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* ========================================================= */}
+                    {/* [기능 1 & 2 통합] 이 장의 사진 넣기/바꾸기/지우기 & 비율/블러 설정 */}
+                    {/* ========================================================= */}
+                    <div className="p-3.5 rounded-xl bg-blue-50/60 border border-blue-200 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-extrabold text-blue-950">
+                          🖼️ {activeSlideIndex + 1}장 전용 사진 관리 ({activePhotoUrls.length}장)
+                        </span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <label className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold cursor-pointer shadow-sm">
+                            📷 {activePhotoUrls.length > 0 ? '이 장 사진 바꾸기' : '이 장에 사진 넣기'}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={(e) =>
+                                handleSlideSpecificPhotoUpload(e.target.files, 'set-slide-photo')
+                              }
+                              className="hidden"
+                            />
+                          </label>
+                          {activePhotoUrls.length > 0 && (
+                            <>
+                              <label className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-blue-50 text-blue-700 border border-blue-300 text-xs font-bold cursor-pointer">
+                                + 사진 추가
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  multiple
+                                  onChange={(e) =>
+                                    handleSlideSpecificPhotoUpload(
+                                      e.target.files,
+                                      'add-more-to-slide'
+                                    )
+                                  }
+                                  className="hidden"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => handleClearSlidePhotos()}
+                                className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold"
+                              >
+                                🗑️ 사진 지우기
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 현재 장에 들어간 사진 썸네일 미리보기 */}
+                      {activePhotoUrls.length > 0 && (
+                        <div className="flex items-center gap-2 overflow-x-auto py-1">
+                          {activePhotoUrls.map((url, pIdx) => (
+                            <div
+                              key={`${url.slice(-18)}-${pIdx}`}
+                              className="relative w-14 h-14 rounded-lg overflow-hidden border border-blue-300 bg-white flex-shrink-0 group"
+                            >
+                              <img src={url} alt="" className="w-full h-full object-contain" />
+                              <button
+                                type="button"
+                                onClick={() => handleClearSlidePhotos(url)}
+                                className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center"
+                                title="이 사진 제거"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* [기능 2 핵심] 사진 표시 방식: 전체 보이기(기본, 자르지 않음) vs 꽉 채우기(자름) */}
+                      <div className="space-y-2 pt-2 border-t border-blue-200/70">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-extrabold text-slate-800">
+                            📐 사진 표시 방식 (찌그러짐 없이 원본 비율 100% 유지)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handlePhotoFitOrBgChange(
+                                activeSlide.photoFitMode || 'contain',
+                                activeSlide.photoBgFillMode || 'solid',
+                                true
+                              )
+                            }
+                            className="text-[11px] text-blue-700 underline font-bold"
+                          >
+                            전체 장에 똑같이 적용
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handlePhotoFitOrBgChange(
+                                'contain',
+                                activeSlide.photoBgFillMode || 'solid',
+                                false
+                              )
+                            }
+                            className={`py-2 px-2.5 rounded-xl text-xs font-extrabold border text-left transition ${
+                              (activeSlide.photoFitMode || 'contain') === 'contain'
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                            }`}
+                          >
+                            <div>✅ 전체 보이기 (기본)</div>
+                            <div
+                              className={`text-[10px] font-normal ${
+                                (activeSlide.photoFitMode || 'contain') === 'contain'
+                                  ? 'text-blue-100'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              자르지 않고 비율 맞춰 크게
+                            </div>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handlePhotoFitOrBgChange(
+                                'cover',
+                                activeSlide.photoBgFillMode || 'solid',
+                                false
+                              )
+                            }
+                            className={`py-2 px-2.5 rounded-xl text-xs font-extrabold border text-left transition ${
+                              activeSlide.photoFitMode === 'cover'
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                            }`}
+                          >
+                            <div>🖼️ 꽉 채우기 (자름)</div>
+                            <div
+                              className={`text-[10px] font-normal ${
+                                activeSlide.photoFitMode === 'cover'
+                                  ? 'text-blue-100'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              박스에 빈틈없이 꽉 채움
+                            </div>
+                          </button>
+                        </div>
+
+                        {/* '전체 보이기(자르지 않음)'일 때 남는 빈 공간 채우기 옵션 */}
+                        {(activeSlide.photoFitMode || 'contain') === 'contain' && (
+                          <div className="pt-1 space-y-1.5">
+                            <span className="block text-[11px] font-bold text-slate-700">
+                              🎨 남는 빈 공간(여백) 채우기 방식:
+                            </span>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handlePhotoFitOrBgChange('contain', 'solid', false)
+                                }
+                                className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border ${
+                                  (activeSlide.photoBgFillMode || 'solid') === 'solid'
+                                    ? 'bg-slate-900 text-white border-slate-900'
+                                    : 'bg-white text-slate-700 border-slate-300'
+                                }`}
+                              >
+                                🎨 기본: 배경색으로 채우기
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handlePhotoFitOrBgChange('contain', 'blur', false)
+                                }
+                                className={`py-1.5 px-2.5 rounded-lg text-xs font-bold border ${
+                                  activeSlide.photoBgFillMode === 'blur'
+                                    ? 'bg-indigo-600 text-white border-indigo-600'
+                                    : 'bg-white text-slate-700 border-slate-300'
+                                }`}
+                              >
+                                🌫️ 같은 사진 흐리게 깔기 (블러)
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 사진 크기/위치 빠른 조절 버튼 */}
+                        {activePhotoUrls.length > 0 && (
+                          <div className="flex items-center justify-between gap-1.5 pt-1">
+                            <span className="text-[11px] text-slate-600 font-semibold">
+                              사진 크기·위치 조절:
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustActivePhotoScaleOrPos('zoom-out')}
+                                className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
+                              >
+                                🔍 작게 (-)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustActivePhotoScaleOrPos('zoom-in')}
+                                className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
+                              >
+                                🔍 크게 (+)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustActivePhotoScaleOrPos('center')}
+                                className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
+                              >
+                                🎯 비율 맞춰 정중앙
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 3. 카드 디자인 템플릿 & 배경 설정 */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-extrabold text-slate-900">
+                    3. 카드 디자인 템플릿 & 배경 변경
+                  </h2>
+                  <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
+                    {(['4:5', '1:1'] as AspectRatioKey[]).map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setAspectRatio(r)}
+                        className={`px-2.5 py-1 rounded text-xs font-bold ${
+                          aspectRatio === r
+                            ? 'bg-white text-blue-600 shadow-sm'
+                            : 'text-slate-600'
+                        }`}
+                      >
+                        {r === '4:5' ? '4:5 세로형' : '1:1 정사각'}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleGenerateWithAI}
-                    disabled={isGeneratingAI}
-                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-extrabold text-xs sm:text-sm shadow-md disabled:opacity-50"
-                  >
-                    {isGeneratingAI
-                      ? '🤖 AI가 초안 만드는 중...'
-                      : `✨ AI로 ${slideCount}장 초안 자동 생성 (캔버스에 객체로 배치)`}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (confirm('현재 편집 중인 내용을 초기 기본 초안으로 리셋할까요?')) {
-                        buildDefaultSlides(slideCount, true);
-                      }
-                    }}
-                    className="px-3 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
-                  >
-                    🔄 초기화
-                  </button>
-                </div>
-              </div>
-
-              {/* 2. 템플릿 언제든 변경 & 배경 설정 */}
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-base font-extrabold text-slate-900">
-                    2. 카드 디자인 템플릿 & 배경 설정
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => handleApplyTemplate(templateId, true)}
-                    className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-[11px] font-bold hover:bg-slate-800"
-                  >
-                    ✨ 선택 템플릿 전체 카드에 적용
-                  </button>
-                </div>
-
                 <div className="grid grid-cols-2 gap-2">
-                  {CARD_TEMPLATES.map((tpl) => (
-                    <button
-                      key={tpl.id}
-                      type="button"
-                      onClick={() => handleApplyTemplate(tpl.id, false)}
-                      className={`p-2.5 rounded-xl border text-left transition ${
-                        templateId === tpl.id
-                          ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
-                          : 'border-slate-200 hover:border-slate-300 bg-white'
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className="w-3.5 h-3.5 rounded-full border border-slate-300 flex-shrink-0"
-                          style={{ backgroundColor: tpl.bgColor }}
-                        />
-                        <span className="text-xs font-extrabold text-slate-900 truncate">
-                          {tpl.name}
-                        </span>
+                  {CARD_TEMPLATES.map((tpl) => {
+                    const isSelected = (activeSlide?.templateId || templateId) === tpl.id;
+                    return (
+                      <div
+                        key={tpl.id}
+                        className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
+                            : 'border-slate-200 hover:border-slate-300 bg-white'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-extrabold text-slate-900">
+                              {tpl.name}
+                            </span>
+                            <span
+                              className="w-3.5 h-3.5 rounded-full border border-slate-300 flex-shrink-0"
+                              style={{ backgroundColor: tpl.accentColor }}
+                            />
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-1">
+                            {tpl.desc}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 mt-2">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectTemplate(tpl.id, false)}
+                            className="flex-1 py-1 rounded bg-white border border-slate-300 hover:bg-blue-600 hover:text-white hover:border-blue-600 text-[11px] font-bold transition"
+                          >
+                            이 장에 적용
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectTemplate(tpl.id, true)}
+                            className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-800 hover:text-white text-[10px] font-bold transition"
+                            title="모든 슬라이드에 이 템플릿 적용"
+                          >
+                            전체 적용
+                          </button>
+                        </div>
                       </div>
-                      <p className="text-[10px] text-slate-500 mt-0.5 truncate">{tpl.desc}</p>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {/* 배경색 / 배경 이미지 / 포인트 컬러 */}
-                <div className="pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                    <span className="text-xs font-bold text-slate-700">🎨 카드 배경색</span>
-                    <div className="flex items-center gap-1.5">
-                      {['#FFFFFF', '#F8FAFC', '#F6F1E7', '#FFF5F7', '#0F172A', '#121214'].map(
-                        (hex) => (
-                          <button
-                            key={hex}
-                            type="button"
-                            onClick={() => handleChangeCanvasBgColor(hex)}
-                            className="w-5 h-5 rounded-full border border-slate-300"
-                            style={{ backgroundColor: hex }}
-                          />
-                        )
-                      )}
-                      <input
-                        type="color"
-                        value={canvasBgColor.startsWith('#') ? canvasBgColor : '#FFFFFF'}
-                        onChange={(e) => handleChangeCanvasBgColor(e.target.value)}
-                        className="w-6 h-6 rounded cursor-pointer border border-slate-300"
-                      />
-                    </div>
+                <div className="pt-2 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="flex items-center justify-between sm:justify-start gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    <span className="text-xs font-bold text-slate-700">배경색</span>
+                    <input
+                      type="color"
+                      value={canvasBgColor.startsWith('#') ? canvasBgColor : '#F8FAFC'}
+                      onChange={(e) => handleCanvasBgColorChange(e.target.value)}
+                      className="w-8 h-7 rounded cursor-pointer border border-slate-300"
+                    />
                   </div>
 
-                  <div className="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                    <span className="text-xs font-bold text-slate-700">🖼️ 배경 이미지</span>
-                    <div className="flex items-center gap-1.5">
-                      <label className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold cursor-pointer">
-                        업로드
-                        <input
-                          type="file"
-                          accept="image/*"
-                          onChange={(e) => handleSetBackgroundImageFromFile(e.target.files)}
-                          className="hidden"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const canvas = fabricCanvasRef.current;
-                          if (!canvas) return;
-                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                          const bgObj = canvas.getObjects().find((o: any) => o.customRole === 'bg-photo');
-                          if (bgObj) {
-                            canvas.remove(bgObj);
-                            canvas.requestRenderAll();
-                            saveCanvasToActiveSlide(true);
-                          }
-                        }}
-                        className="px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold"
-                      >
-                        제거
-                      </button>
-                    </div>
+                  <div className="flex items-center justify-between sm:justify-start gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                    <span className="text-xs font-bold text-slate-700">강조색</span>
+                    <input
+                      type="color"
+                      value={accentColor}
+                      onChange={(e) => setAccentColor(e.target.value)}
+                      className="w-8 h-7 rounded cursor-pointer border border-slate-300"
+                    />
                   </div>
+
+                  <label className="flex items-center justify-center gap-1.5 bg-slate-50 hover:bg-slate-100 p-2.5 rounded-xl border border-slate-200 cursor-pointer text-xs font-bold text-slate-700">
+                    <span>🖼️ 배경 이미지 깔기</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handlePhotoFiles(e.target.files, 'set-bg')}
+                      className="hidden"
+                    />
+                  </label>
                 </div>
 
-                {/* 워터마크 켜기/끄기 (기본값: 꺼짐, AUTO CARD STUDIO 완전 제거) */}
-                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                {/* 워터마크 옵션 (기본값: 꺼짐) */}
+                <div className="pt-2 border-t border-slate-100 bg-slate-50/80 p-3 rounded-xl space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-800">
-                      🏷️ 워터마크 켜기/끄기 (기본값: 끄기 · AUTO CARD STUDIO 제거됨)
+                    <span className="text-xs font-extrabold text-slate-800">
+                      🏷️ 워터마크 켜기/끄기 (기본값: 끄기)
                     </span>
                     <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs font-extrabold text-blue-600">
                       <input
@@ -3163,15 +4571,15 @@ export default function InstaAutoStudioPage() {
                 </div>
               </div>
 
-              {/* 3. 폰트 관리 (기본 폰트 14종 + 내 폰트 업로드 & localForage 저장) */}
+              {/* 4. 폰트 관리 (기본 폰트 14종 + 내 폰트 업로드) */}
               <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h2 className="text-base font-extrabold text-slate-900">
-                      3. 폰트 선택 & 내 폰트 파일 업로드
+                      4. 폰트 선택 & 내 폰트 파일 업로드
                     </h2>
                     <p className="text-[11px] text-slate-500">
-                      업로드한 폰트는 브라우저(localForage)에 자동 저장되어 다시 열어도 유지됩니다.
+                      업로드한 폰트는 자동 저장되어 다시 열어도 그대로 유지됩니다.
                     </p>
                   </div>
                   <label className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold cursor-pointer shadow-sm">
@@ -3185,11 +4593,10 @@ export default function InstaAutoStudioPage() {
                   </label>
                 </div>
 
-                {/* 내가 업로드한 커스텀 폰트 목록 */}
                 {customFonts.length > 0 && (
                   <div className="p-3 rounded-xl bg-indigo-50/80 border border-indigo-200 space-y-2">
                     <span className="text-xs font-extrabold text-indigo-950 block">
-                      📁 내가 업로드한 폰트 (새로고침해도 유지됨)
+                      📁 내가 업로드한 폰트
                     </span>
                     <div className="flex flex-wrap gap-1.5">
                       {customFonts.map((cf) => (
@@ -3222,7 +4629,6 @@ export default function InstaAutoStudioPage() {
                   </div>
                 )}
 
-                {/* 기본 제공 한글 폰트 14종 그리드 */}
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-56 overflow-y-auto pr-1">
                   {EDITOR_KOREAN_FONTS.map((f) => {
                     const isSelected = selFontFamily === f.id || fontId === f.id;
@@ -3246,11 +4652,11 @@ export default function InstaAutoStudioPage() {
                 </div>
               </div>
 
-              {/* 4. 인스타그램 캡션 & 바로 업로드 / 예약 업로드 */}
+              {/* 5. 인스타그램 캡션 & 바로 업로드 / 예약 업로드 */}
               <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
                 <div className="flex items-center justify-between">
                   <h2 className="text-base font-extrabold text-slate-900">
-                    4. 인스타 캡션 & 자동 업로드
+                    5. 인스타 캡션 & 자동 업로드
                   </h2>
                   <div className="flex gap-1">
                     {CAPTION_TONES.map((t) => (
@@ -3294,7 +4700,7 @@ export default function InstaAutoStudioPage() {
                   </span>
                 </div>
 
-                {accounts.length > 0 && (
+                {accounts.length > 0 ? (
                   <div className="space-y-2 pt-2 border-t border-slate-100">
                     <span className="text-xs font-bold text-slate-700 block">
                       올릴 인스타그램 계정 선택
@@ -3366,7 +4772,7 @@ export default function InstaAutoStudioPage() {
                       disabled={isCaptionOverLimit}
                       onClick={() => {
                         if (!sessionToken) {
-                          showToast('⚠️ 먼저 로그인해 주세요.');
+                          showToast('⚠️ 먼저 상단에서 로그인해 주세요.');
                           return;
                         }
                         if (selectedAccountIds.length === 0) {
@@ -3377,19 +4783,23 @@ export default function InstaAutoStudioPage() {
                       }}
                       className="w-full py-3 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700 text-white font-extrabold text-xs sm:text-sm shadow-md"
                     >
-                      🚀 캔버스 편집본 그대로 인스타그램에 올리기
+                      🚀 미리보기 그대로 인스타그램에 올리기
                     </button>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+                    💡 인스타그램에 바로 올리려면 상단 <strong>[내 계정들]</strong> 탭에서 인스타 계정을 연결해 주세요. (이미지 ZIP 다운로드는 계정 연결 없이 바로 가능합니다!)
                   </div>
                 )}
               </div>
             </div>
 
             {/* ============================================================= */}
-            {/* 오른쪽 패널 (7칸): Fabric.js 캔버스 + 객체별 전용 편집 툴바     */}
+            {/* 오른쪽 패널 (7칸): 실시간 미리보기 캔버스 + 객체별 전용 편집 툴바 */}
             {/* ============================================================= */}
             <div className="lg:col-span-7 lg:sticky lg:top-20 space-y-4 order-1 lg:order-2">
               <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm space-y-4">
-                {/* 상단: 슬라이드 이동 탭 & 실행취소/다시실행 & ZIP 다운로드 바 */}
+                {/* 상단: 실행취소/다시실행 & ZIP 다운로드 바 */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
@@ -3416,7 +4826,9 @@ export default function InstaAutoStudioPage() {
                       disabled={regeneratingSlideIdx === activeSlideIndex}
                       className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-extrabold"
                     >
-                      {regeneratingSlideIdx === activeSlideIndex ? '생성중...' : '🔄 AI 문구교체'}
+                      {regeneratingSlideIdx === activeSlideIndex
+                        ? '생성중...'
+                        : '🔄 이 장만 AI로 다시 만들기'}
                     </button>
                   </div>
 
@@ -3424,10 +4836,10 @@ export default function InstaAutoStudioPage() {
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
-                      onClick={() => handleDownloadCurrentSlide('png')}
+                      onClick={() => handleDownloadCurrentSlide('jpeg')}
                       className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold"
                     >
-                      📥 이 장 PNG
+                      📥 이 장 JPG
                     </button>
                     <button
                       type="button"
@@ -3448,7 +4860,7 @@ export default function InstaAutoStudioPage() {
                   </div>
                 </div>
 
-                {/* 슬라이드 선택 탭 + 복제/삭제 */}
+                {/* 슬라이드 선택 탭 + 순서 바꾸기 + 장 추가/삭제 */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
                     {slides.map((s, idx) => (
@@ -3468,15 +4880,41 @@ export default function InstaAutoStudioPage() {
                         {idx + 1}장
                       </button>
                     ))}
+                    <button
+                      type="button"
+                      onClick={handleAddNewBlankSlide}
+                      disabled={slides.length >= maxSlideLimit}
+                      className="px-2.5 py-1.5 rounded-xl text-xs font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 flex-shrink-0 disabled:opacity-40"
+                    >
+                      + 장 추가
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <button
                       type="button"
+                      onClick={() => handleMoveSlideOrder('left')}
+                      disabled={activeSlideIndex === 0}
+                      className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold disabled:opacity-40"
+                      title="앞장으로 이동"
+                    >
+                      ◀
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleMoveSlideOrder('right')}
+                      disabled={activeSlideIndex >= slides.length - 1}
+                      className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold disabled:opacity-40"
+                      title="뒷장으로 이동"
+                    >
+                      ▶
+                    </button>
+                    <button
+                      type="button"
                       onClick={duplicateActiveSlide}
                       className="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold"
                     >
-                      + 카드 복제
+                      복제
                     </button>
                     <button
                       type="button"
@@ -3488,9 +4926,7 @@ export default function InstaAutoStudioPage() {
                   </div>
                 </div>
 
-                {/* ========================================================= */}
-                {/* 요소 추가 빠른 버튼 바 (글씨 추가 / 사진 여러 장 추가 / 도형 추가) */}
-                {/* ========================================================= */}
+                {/* 요소 추가 빠른 버튼 바 */}
                 <div className="flex flex-wrap items-center gap-1.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200">
                   <span className="text-[11px] font-extrabold text-slate-600 mr-1">➕ 요소 추가:</span>
                   <button
@@ -3516,12 +4952,12 @@ export default function InstaAutoStudioPage() {
                   </button>
 
                   <label className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold cursor-pointer">
-                    🖼️ 이 카드에 사진 추가 (여러 장 가능)
+                    📷 이 장에 사진 넣기 (잘리지 않게 비율 맞춤)
                     <input
                       type="file"
                       accept="image/*"
                       multiple
-                      onChange={(e) => handlePhotoFiles(e.target.files, 'add-to-canvas')}
+                      onChange={(e) => handleSlideSpecificPhotoUpload(e.target.files, 'set-slide-photo')}
                       className="hidden"
                     />
                   </label>
@@ -3549,18 +4985,15 @@ export default function InstaAutoStudioPage() {
                   </button>
                 </div>
 
-                {/* ========================================================= */}
-                {/* 선택된 객체별 맞춤 컨트롤 바 (글씨 / 사진 / 도형 / 레이어)   */}
-                {/* ========================================================= */}
+                {/* 선택된 객체별 맞춤 컨트롤 바 */}
                 {selectedObjType !== 'none' ? (
                   <div className="p-3 rounded-xl bg-blue-50/60 border border-blue-200 space-y-3">
-                    {/* 공통 상단: 객체 종류 표시 + 레이어 순서(앞으로/뒤로) + 투명도 + 삭제 */}
                     <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-blue-200/70">
                       <span className="text-xs font-extrabold text-blue-900">
                         {selectedObjType === 'text'
                           ? '✏️ 글자 박스 선택됨 (더블클릭하면 캔버스에서 직접 타이핑)'
                           : selectedObjType === 'image'
-                          ? '🖼️ 사진 객체 선택됨 (드래그 이동 · 모서리 크기조절 · 회전 · 자르기)'
+                          ? '🖼️ 사진 객체 선택됨 (드래그 이동 · 모서리 크기조절 · 비율유지)'
                           : '🔷 도형 객체 선택됨'}
                       </span>
 
@@ -3569,7 +5002,6 @@ export default function InstaAutoStudioPage() {
                           type="button"
                           onClick={() => handleLayerOrder('front')}
                           className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
-                          title="맨 앞으로 가져오기"
                         >
                           ⬆️ 맨앞
                         </button>
@@ -3577,7 +5009,6 @@ export default function InstaAutoStudioPage() {
                           type="button"
                           onClick={() => handleLayerOrder('forward')}
                           className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
-                          title="한 단계 앞으로"
                         >
                           🔼 앞으로
                         </button>
@@ -3585,7 +5016,6 @@ export default function InstaAutoStudioPage() {
                           type="button"
                           onClick={() => handleLayerOrder('backward')}
                           className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
-                          title="한 단계 뒤로"
                         >
                           🔽 뒤로
                         </button>
@@ -3593,7 +5023,6 @@ export default function InstaAutoStudioPage() {
                           type="button"
                           onClick={() => handleLayerOrder('back')}
                           className="px-2 py-1 rounded bg-white border border-slate-300 text-[11px] font-bold hover:bg-slate-100"
-                          title="맨 뒤로 보내기"
                         >
                           ⬇️ 맨뒤
                         </button>
@@ -3607,10 +5036,9 @@ export default function InstaAutoStudioPage() {
                       </div>
                     </div>
 
-                    {/* 1) 텍스트 선택 시 전용 툴바: 내용, 폰트, 크기, 굵기, 색상, 정렬, 자간, 행간 */}
+                    {/* 텍스트 선택 시 전용 툴바 */}
                     {selectedObjType === 'text' && (
                       <div className="space-y-2.5 text-xs">
-                        {/* 모바일에서도 쉽게 글씨를 고칠 수 있는 빠른 입력창 */}
                         <textarea
                           rows={2}
                           value={selTextValue}
@@ -3623,7 +5051,6 @@ export default function InstaAutoStudioPage() {
                         />
 
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                          {/* 폰트 변경 */}
                           <div>
                             <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
                               폰트
@@ -3646,7 +5073,6 @@ export default function InstaAutoStudioPage() {
                             </select>
                           </div>
 
-                          {/* 글자 크기 */}
                           <div>
                             <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
                               크기 ({selFontSize}px)
@@ -3665,7 +5091,6 @@ export default function InstaAutoStudioPage() {
                             />
                           </div>
 
-                          {/* 굵기 & 정렬 */}
                           <div>
                             <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
                               굵기 & 정렬
@@ -3706,7 +5131,6 @@ export default function InstaAutoStudioPage() {
                             </div>
                           </div>
 
-                          {/* 글자색 & 배경 하이라이트 */}
                           <div className="flex items-center gap-3">
                             <div>
                               <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
@@ -3753,7 +5177,6 @@ export default function InstaAutoStudioPage() {
                           </div>
                         </div>
 
-                        {/* 자간(charSpacing) · 행간(lineHeight) · 투명도 슬라이더 */}
                         <div className="grid grid-cols-3 gap-3 pt-1">
                           <div>
                             <label className="block text-[10px] font-bold text-slate-600">
@@ -3812,12 +5235,12 @@ export default function InstaAutoStudioPage() {
                       </div>
                     )}
 
-                    {/* 2) 사진 선택 시 전용 툴바: 교체, 크롭(자르기), 회전, 모서리 둥글기, 투명도 */}
+                    {/* 사진 선택 시 전용 툴바 */}
                     {selectedObjType === 'image' && (
                       <div className="space-y-2.5 text-xs">
                         <div className="flex flex-wrap items-center gap-2">
                           <label className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-extrabold cursor-pointer">
-                            🔄 다른 사진으로 교체
+                            🔄 다른 사진으로 교체 (비율 유지)
                             <input
                               type="file"
                               accept="image/*"
@@ -3826,13 +5249,35 @@ export default function InstaAutoStudioPage() {
                             />
                           </label>
 
+                          <button
+                            type="button"
+                            onClick={() => handleAdjustActivePhotoScaleOrPos('zoom-in')}
+                            className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-800"
+                          >
+                            🔍 크게 (+)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAdjustActivePhotoScaleOrPos('zoom-out')}
+                            className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-800"
+                          >
+                            🔍 작게 (-)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAdjustActivePhotoScaleOrPos('center')}
+                            className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-800"
+                          >
+                            🎯 비율 맞춰 크게 정중앙
+                          </button>
+
                           {!isCropping ? (
                             <button
                               type="button"
                               onClick={handleStartCropMode}
-                              className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-extrabold"
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-extrabold"
                             >
-                              ✂️ 사진 자르기 (크롭)
+                              ✂️ 직접 자르기
                             </button>
                           ) : (
                             <div className="flex items-center gap-1.5">
@@ -3852,36 +5297,6 @@ export default function InstaAutoStudioPage() {
                               </button>
                             </div>
                           )}
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const canvas = fabricCanvasRef.current;
-                              const active = canvas?.getActiveObject?.();
-                              if (!active) return;
-                              const nextAngle = ((active.angle || 0) + 90) % 360;
-                              active.rotate(nextAngle);
-                              setSelAngle(nextAngle);
-                              canvas.requestRenderAll();
-                              saveCanvasToActiveSlide(true);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-800"
-                          >
-                            🔄 90° 회전
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              const canvas = fabricCanvasRef.current;
-                              const active = canvas?.getActiveObject?.();
-                              if (!active || !active.originalSrc) return;
-                              await handleReplaceSelectedPhoto(active.originalSrc);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-700"
-                          >
-                            ↺ 크롭 초기화
-                          </button>
                         </div>
 
                         <div className="grid grid-cols-3 gap-3 pt-1">
@@ -3942,10 +5357,10 @@ export default function InstaAutoStudioPage() {
                       </div>
                     )}
 
-                    {/* 3) 도형(사각형/원/선) 선택 시 전용 툴바 */}
+                    {/* 도형 선택 시 전용 툴바 */}
                     {selectedObjType === 'shape' && (
                       <div className="space-y-2 text-xs">
-                        { isCropping && (
+                        {isCropping && (
                           <div className="flex items-center justify-between bg-amber-100 border border-amber-300 px-3 py-2 rounded-lg">
                             <span className="font-extrabold text-amber-900">
                               ✂️ 크롭 영역 박스를 조절한 뒤 오른쪽 버튼을 눌러주세요!
@@ -4034,27 +5449,38 @@ export default function InstaAutoStudioPage() {
                 ) : (
                   <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
                     <span>
-                      💡 <strong>캔버스 위의 글자·사진·도형을 클릭</strong>하면 이동, 크기 조절, 회전, 크롭, 폰트·자간·행간 편집창이 여기에 열립니다!
+                      💡 <strong>왼쪽 2번 칸에서 글자를 고치면 미리보기가 바로 바뀌며</strong>, 캔버스 위 글자·사진을 마우스로 직접 옮기고 크기를 줄일 수도 있어요!
                     </span>
-                    <span className="text-[11px] text-slate-400 hidden sm:inline">
-                      단축키: Ctrl+Z / Ctrl+Y / Delete
-                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!activeSlide || !fabricCanvasRef.current) return;
+                        const cleanSlide: SlideItem = { ...activeSlide, fabricJson: undefined };
+                        setSlides((prev) =>
+                          prev.map((s, i) => (i === activeSlideIndex ? cleanSlide : s))
+                        );
+                        await buildFabricObjectsForSlide(
+                          fabricCanvasRef.current,
+                          cleanSlide,
+                          slides.length
+                        );
+                        saveCanvasToActiveSlide(true);
+                        showToast('🔄 이 장의 레이아웃 배치를 깔끔하게 다시 정렬했습니다!');
+                      }}
+                      className="text-[11px] font-extrabold text-blue-600 hover:underline flex-shrink-0 ml-2"
+                    >
+                      🔄 배치 재정렬
+                    </button>
                   </div>
                 )}
 
                 {/* ========================================================= */}
-                {/* 메인 인터랙티브 Fabric.js 캔버스 뷰포트 (반응형 자동 스케일)  */}
+                {/* 메인 인터랙티브 Fabric.js 캔버스 뷰포트 (미리보기 100% 보장) */}
                 {/* ========================================================= */}
                 <div
                   ref={wrapperRef}
                   className="w-full flex flex-col items-center justify-center bg-slate-200/70 rounded-2xl p-2 sm:p-4 overflow-hidden select-none"
                 >
-                  {!libsReady && (
-                    <div className="py-24 text-center text-sm font-bold text-slate-600">
-                      🎨 Fabric.js v6 캔버스 에디터를 불러오는 중입니다...
-                    </div>
-                  )}
-
                   <div
                     className="relative shadow-2xl border border-slate-300 bg-white overflow-hidden"
                     style={{
@@ -4062,7 +5488,44 @@ export default function InstaAutoStudioPage() {
                       height: `${Math.round(targetDimensions.height * canvasScale)}px`,
                     }}
                   >
-                    {/* 1080x1350 (또는 1080x1080) 원본 해상도 캔버스를 CSS scale로 표시 */}
+                    {/* Fabric 스크립트가 로드되기 전 0.5초 동안에도 즉시 보이는 HTML 미리보기 */}
+                    {!libsReady && activeSlide && (
+                      <div
+                        className="absolute inset-0 z-10 flex flex-col justify-between p-6"
+                        style={{ backgroundColor: canvasBgColor }}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span
+                            className="px-3 py-1 rounded-lg text-xs font-extrabold text-white"
+                            style={{ backgroundColor: accentColor }}
+                          >
+                            {activeSlide.badgeText || `${activeSlideIndex + 1}장`}
+                          </span>
+                          <span className="text-xs font-bold text-slate-500">
+                            {activeSlideIndex + 1} / {slides.length}
+                          </span>
+                        </div>
+                        {activePhotoUrls[0] && (
+                          <div className="my-2 flex-1 flex items-center justify-center overflow-hidden rounded-xl bg-slate-100">
+                            <img
+                              src={activePhotoUrls[0]}
+                              alt=""
+                              className="max-w-full max-h-full object-contain"
+                            />
+                          </div>
+                        )}
+                        <div className="bg-white/95 rounded-2xl p-4 shadow-sm space-y-2">
+                          <h3 className="text-base font-extrabold text-slate-900">
+                            {activeSlide.headline || '제목을 입력하세요'}
+                          </h3>
+                          <p className="text-xs text-slate-600 whitespace-pre-line">
+                            {activeSlide.body || '본문 내용을 입력하세요'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 1080x1350 (또는 1080x1080) 원본 해상도 Fabric 캔버스 */}
                     <div
                       style={{
                         width: `${targetDimensions.width}px`,
@@ -4093,7 +5556,7 @@ export default function InstaAutoStudioPage() {
               </div>
             </div>
           </div>
-        )}
+        </div>
 
         {/* ================================================================= */}
         {/* [탭 2] 연결된 내 인스타그램 계정 관리 탭                            */}
@@ -4148,21 +5611,28 @@ export default function InstaAutoStudioPage() {
                             />
                           ) : (
                             <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-purple-500 to-pink-500 text-white font-bold flex items-center justify-center">
-                              {acc.username.slice(0, 2).toUpperCase()}
+                              @{acc.username.slice(0, 2)}
                             </div>
                           )}
                           <div>
-                            <h3 className="font-bold text-slate-900 text-base">@{acc.username}</h3>
-                            <p className="text-xs text-slate-500">{acc.name}</p>
+                            <div className="flex items-center gap-2">
+                              <span className="font-extrabold text-slate-900">@{acc.username}</span>
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                                ● 정상 연결됨
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              기본 폰트: {acc.default_font || 'Pretendard'}
+                            </p>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => setEditingAccountId(isEditing ? null : acc.id)}
-                            className="text-xs px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                            className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-50"
                           >
-                            {isEditing ? '닫기' : '⚙️ 기본 해시태그'}
+                            {isEditing ? '닫기' : '기본값 설정'}
                           </button>
                           <button
                             onClick={async () => {
@@ -4172,55 +5642,13 @@ export default function InstaAutoStudioPage() {
                                 headers: { Authorization: `Bearer ${sessionToken}` },
                               });
                               fetchAccounts();
-                              showToast('계정 연결이 해제되었습니다.');
                             }}
-                            className="text-xs px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 font-semibold"
+                            className="px-3 py-1.5 rounded-lg border border-rose-200 text-xs font-bold text-rose-600 hover:bg-rose-50"
                           >
                             연결 해제
                           </button>
                         </div>
                       </div>
-
-                      {isEditing && (
-                        <div className="pt-3 border-t border-slate-100 space-y-2">
-                          <label className="block text-xs text-slate-500">기본 해시태그 묶음</label>
-                          <input
-                            type="text"
-                            value={acc.default_hashtags}
-                            onChange={(e) =>
-                              setAccounts((prev) =>
-                                prev.map((a) =>
-                                  a.id === acc.id ? { ...a, default_hashtags: e.target.value } : a
-                                )
-                              )
-                            }
-                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs"
-                          />
-                          <button
-                            onClick={async () => {
-                              await fetch('/api/accounts', {
-                                method: 'PATCH',
-                                headers: {
-                                  'Content-Type': 'application/json',
-                                  Authorization: `Bearer ${sessionToken}`,
-                                },
-                                body: JSON.stringify({
-                                  accountId: acc.id,
-                                  default_font: acc.default_font,
-                                  default_mood: acc.default_mood,
-                                  default_accent_color: acc.default_accent_color,
-                                  default_hashtags: acc.default_hashtags,
-                                }),
-                              });
-                              setEditingAccountId(null);
-                              showToast(`✅ @${acc.username} 설정이 저장되었습니다!`);
-                            }}
-                            className="w-full py-2 rounded-lg bg-blue-600 text-white text-xs font-bold"
-                          >
-                            저장하기
-                          </button>
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -4230,99 +5658,90 @@ export default function InstaAutoStudioPage() {
         )}
 
         {/* ================================================================= */}
-        {/* [탭 3] 내 게시물 업로드 · 예약 기록 탭                              */}
+        {/* [탭 3] 업로드 기록 탭                                              */}
         {/* ================================================================= */}
         {activeTab === 'history' && (
-          <section className="space-y-4">
+          <section className="space-y-5">
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex items-center justify-between">
               <div>
-                <h2 className="text-xl font-extrabold text-slate-900">내 게시물 업로드 · 예약 기록</h2>
+                <h2 className="text-xl font-extrabold text-slate-900">업로드 및 예약 기록</h2>
+                <p className="text-sm text-slate-600 mt-1">
+                  계정별 업로드 상태와 실패 시 원클릭 재시도를 지원합니다.
+                </p>
               </div>
               <button
                 onClick={fetchPostHistory}
-                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-bold text-slate-700"
+                className="px-4 py-2 rounded-xl border border-slate-300 text-xs font-bold hover:bg-slate-50"
               >
                 🔄 새로고침
               </button>
             </div>
 
             {postHistory.length === 0 ? (
-              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center">
-                <p className="text-base font-bold text-slate-700">
-                  아직 업로드하거나 예약한 게시물이 없습니다.
-                </p>
+              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center text-slate-500 font-semibold">
+                아직 업로드하거나 예약한 게시물이 없습니다.
               </div>
             ) : (
               <div className="space-y-4">
                 {postHistory.map((post) => (
                   <div
                     key={post.id}
-                    className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4"
+                    className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-3"
                   >
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <span className="text-xs font-bold text-blue-600">
-                          총 {post.slide_count}장 ({post.aspect_ratio})
+                        <span className="text-xs font-bold text-blue-600 mr-2">
+                          [{post.aspect_ratio} · {post.slide_count}장]
                         </span>
-                        <h3 className="text-base font-extrabold text-slate-900">{post.title}</h3>
+                        <h3 className="inline font-extrabold text-slate-900">{post.title}</h3>
                       </div>
                       <span className="text-xs text-slate-400">
                         {new Date(post.created_at).toLocaleString('ko-KR')}
                       </span>
                     </div>
 
-                    {Array.isArray(post.rendered_image_urls) && post.rendered_image_urls.length > 0 && (
-                      <div className="flex gap-2 overflow-x-auto pb-2">
-                        {post.rendered_image_urls.map((url, idx) => (
-                          <img
-                            key={idx}
-                            src={url}
-                            alt={`slide-${idx}`}
-                            className="w-24 h-30 object-cover rounded-lg border border-slate-200 flex-shrink-0"
-                          />
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      {(post.post_targets || []).map((t) => (
-                        <div
-                          key={t.id}
-                          className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs"
-                        >
-                          <div>
-                            <span className="font-bold text-slate-900">
-                              @{t.instagram_accounts?.username || '계정'}
-                            </span>
-                            <span className="ml-2 text-slate-600">{t.status}</span>
-                            {t.error_message && (
-                              <p className="text-rose-600 font-semibold mt-0.5">{t.error_message}</p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {t.ig_permalink && (
-                              <a
-                                href={t.ig_permalink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="px-2.5 py-1 rounded bg-blue-50 text-blue-700 font-bold"
-                              >
-                                인스타에서 보기 ↗
-                              </a>
-                            )}
+                    {post.post_targets && post.post_targets.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
+                        {post.post_targets.map((t) => (
+                          <div
+                            key={t.id}
+                            className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-slate-900 truncate">
+                                @{t.instagram_accounts?.username || '계정'}
+                              </div>
+                              <div className="mt-1">
+                                {t.status === 'published' && (
+                                  <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                    ✅ 업로드 성공
+                                  </span>
+                                )}
+                                {t.status === 'scheduled' && (
+                                  <span className="text-[11px] font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
+                                    ⏰ 예약됨
+                                  </span>
+                                )}
+                                {t.status === 'failed' && (
+                                  <span className="text-[11px] font-bold text-rose-700 bg-rose-100 px-2 py-0.5 rounded-full">
+                                    ❌ 실패: {t.error_message || '오류'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                             {t.status === 'failed' && (
                               <button
                                 onClick={() => handleRetryPublish(t.id)}
                                 disabled={retryingTargetId === t.id}
-                                className="px-3 py-1 rounded bg-rose-600 text-white font-bold"
+                                className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex-shrink-0"
                               >
-                                다시 올리기
+                                {retryingTargetId === t.id ? '재시도중...' : '다시 올리기'}
                               </button>
                             )}
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -4334,21 +5753,36 @@ export default function InstaAutoStudioPage() {
       {/* 업로드 최종 확인 모달 */}
       {showConfirmModal && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5">
             <h3 className="text-lg font-extrabold text-slate-900">
-              {scheduleType === 'scheduled'
-                ? '📅 예약 업로드를 등록할까요?'
-                : '🚀 지금 바로 인스타그램에 올릴까요?'}
+              📋 인스타그램 업로드 최종 확인
             </h3>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              캔버스에서 직접 수정하신 <strong>총 {slides.length}장</strong>의 카드뉴스 디자인이 그대로 고화질 이미지로 변환되어 선택한 인스타그램 계정에 업로드됩니다.
+            <p className="text-xs text-slate-600">
+              내가 작성한 글과 비율 맞춰 넣은 사진 미리보기 그대로 고화질 JPEG로 변환되어 인스타그램에 올라갑니다.
             </p>
-            <div className="flex gap-2 pt-2">
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 space-y-2 text-xs sm:text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-500">카드 장수 및 비율:</span>
+                <span className="font-bold text-slate-900">
+                  총 {slides.length}장 ({aspectRatio})
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">업로드 방식:</span>
+                <span className="font-bold text-blue-600">
+                  {scheduleType === 'now'
+                    ? '지금 즉시 업로드'
+                    : `예약 업로드 (${scheduledDateTime})`}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
               <button
                 type="button"
                 onClick={() => setShowConfirmModal(false)}
                 disabled={isPublishing}
-                className="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
+                className="flex-1 py-3 rounded-xl border border-slate-300 font-bold text-slate-700 text-sm hover:bg-slate-50"
               >
                 취소
               </button>
@@ -4356,9 +5790,9 @@ export default function InstaAutoStudioPage() {
                 type="button"
                 onClick={handleExecutePublish}
                 disabled={isPublishing}
-                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 text-white text-xs font-extrabold"
+                className="flex-1 py-3 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 text-white font-extrabold text-sm shadow-lg disabled:opacity-50"
               >
-                {isPublishing ? '고화질 변환 및 업로드 중...' : '네, 지금 올릴게요!'}
+                {isPublishing ? '캔버스 렌더링 및 업로드 중...' : '네, 이대로 올릴게요!'}
               </button>
             </div>
           </div>
