@@ -41,14 +41,14 @@ declare global {
 // ============================================================================
 // [1단계~4단계 통합 설정] 기본 한글 폰트 14종 (Google Fonts + 눈누 웹폰트)
 // ============================================================================
-export interface EditorFontOption {
+interface EditorFontOption {
   id: string;
   name: string;
   category: string;
   cssFamily: string;
 }
 
-export const EDITOR_KOREAN_FONTS: EditorFontOption[] = [
+const EDITOR_KOREAN_FONTS: EditorFontOption[] = [
   { id: 'Pretendard', name: '프리텐다드 (Pretendard)', category: '깔끔 고딕', cssFamily: 'Pretendard' },
   { id: 'Noto Sans KR', name: '본고딕 (Noto Sans KR)', category: '표준 고딕', cssFamily: 'Noto Sans KR' },
   { id: 'Noto Serif KR', name: '본명조 (Noto Serif KR)', category: '정통 명조', cssFamily: 'Noto Serif KR' },
@@ -68,7 +68,7 @@ export const EDITOR_KOREAN_FONTS: EditorFontOption[] = [
 // ============================================================================
 // [2단계 & 4단계] 언제든 바꿔 낄 수 있는 카드뉴스 디자인 템플릿 8종
 // ============================================================================
-export type CardTemplateId =
+type CardTemplateId =
   | 'top-photo-card'
   | 'bottom-photo-card'
   | 'full-bleed-poster'
@@ -78,7 +78,7 @@ export type CardTemplateId =
   | 'dark-neon-card'
   | 'multi-collage-grid';
 
-export interface CardTemplatePreset {
+interface CardTemplatePreset {
   id: CardTemplateId;
   name: string;
   desc: string;
@@ -89,7 +89,7 @@ export interface CardTemplatePreset {
   accentColor: string;
 }
 
-export const CARD_TEMPLATES: CardTemplatePreset[] = [
+const CARD_TEMPLATES: CardTemplatePreset[] = [
   {
     id: 'top-photo-card',
     name: '1. 상단 사진 + 하단 요약형',
