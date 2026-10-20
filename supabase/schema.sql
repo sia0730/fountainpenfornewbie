@@ -139,3 +139,76 @@ drop policy if exists "렌더링 이미지 공개 읽기 (인스타 API 수집�
 create policy "렌더링 이미지 공개 읽기 (인스타 API 수집용)" on storage.objects
   for select to public
   using (bucket_id = 'post-images');
+
+-- ==========================================
+-- 6. AI 카드뉴스 기획안 저장 테이블 (plans)
+-- ==========================================
+create table if not exists public.plans (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  topic text not null,
+  target_audience text default '',
+  purpose text default '',
+  tone text default 'friendly',
+  reference_text text default '',
+  slide_count integer not null default 5,
+  recommended_slide_count integer not null default 5,
+  recommendation_reason text default '',
+  cover_candidates jsonb not null default '[]',
+  cover_title_candidates jsonb not null default '[]',
+  selected_cover_index integer not null default 0,
+  cuts_json jsonb not null default '[]',
+  cuts jsonb not null default '[]',
+  plan_group_json jsonb not null default '[]',
+  brand_settings_json jsonb not null default '{}',
+  caption_draft text default '',
+  status text not null default 'draft',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.plans enable row level security;
+
+drop policy if exists "본인 기획안만 조회/관리" on public.plans;
+create policy "본인 기획안만 조회/관리" on public.plans
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ==========================================
+-- 7. 계정별 브랜드 설정 테이블 (brand_settings)
+-- ==========================================
+create table if not exists public.brand_settings (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  account_id text not null default 'default',
+  tone text default '친근하게',
+  favorite_hashtags text default '',
+  forbidden_words text default '',
+  closing_signature text default '',
+  updated_at timestamptz not null default now()
+);
+
+alter table public.brand_settings enable row level security;
+
+drop policy if exists "본인 브랜드 설정만 조회/관리" on public.brand_settings;
+create policy "본인 브랜드 설정만 조회/관리" on public.brand_settings
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ==========================================
+-- 8. 내 템플릿 저장 테이블 (user_card_templates)
+-- ==========================================
+create table if not exists public.user_card_templates (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  name text not null,
+  template_config jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+alter table public.user_card_templates enable row level security;
+
+drop policy if exists "본인 템플릿만 조회/관리" on public.user_card_templates;
+create policy "본인 템플릿만 조회/관리" on public.user_card_templates
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+
+
